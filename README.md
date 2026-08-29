@@ -191,7 +191,11 @@ requirements = ["diffusers==0.37.1", "transformers==5.2.0"]
 
 [pod]
 image = "runpod/pytorch:1.1.0-cu1290-torch291-ubuntu2204"
-gpu = ["NVIDIA GeForce RTX 4090"]
+gpu = ["NVIDIA GeForce RTX 4090", "NVIDIA RTX A5000"]
+# "availability": RunPod picks whichever it has most of -- which can cost
+# several times the one you listed first. "custom": the order above is a
+# preference, so put the cheapest acceptable card at the top.
+gpu_priority = "availability"
 container_disk_gb = 60
 ```
 

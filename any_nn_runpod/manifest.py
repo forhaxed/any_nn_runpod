@@ -45,6 +45,10 @@ class Recipe:
     # -- pod --------------------------------------------------------
     image: str = "runpod/pytorch:1.1.0-cu1290-torch291-ubuntu2204"
     gpu: list = field(default_factory=list)
+    #: "availability" -- RunPod picks whichever of `gpu` it has most of, which
+    #: may cost several times the one you listed first. "custom" -- the order
+    #: of `gpu` is a preference, cheapest first if that is how you wrote it.
+    gpu_priority: str = "availability"
     gpu_count: int = 1
     container_disk_gb: int = 60
     volume_gb: int = 0
@@ -86,6 +90,7 @@ class Recipe:
             requirements=list(env.get("requirements", [])),
             image=pod.get("image", cls.image),
             gpu=list(pod.get("gpu", [])),
+            gpu_priority=pod.get("gpu_priority", cls.gpu_priority),
             gpu_count=int(pod.get("gpu_count", 1)),
             container_disk_gb=int(pod.get("container_disk_gb", 60)),
             volume_gb=int(pod.get("volume_gb", 0)),

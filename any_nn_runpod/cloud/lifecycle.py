@@ -114,6 +114,7 @@ def create(
         network_volume_id=recipe.network_volume_id,
         cloud_type=recipe.cloud_type,
         data_centers=recipe.data_centers,
+        gpu_priority=recipe.gpu_priority,
     )
     say(
         f"  pod {pod['id']} created; waiting for a machine and an address.\n"
@@ -144,7 +145,13 @@ def create(
         raise problem
 
     host, mapped = endpoint(pod, ports[0])
-    say(f"  reachable at {host}:{mapped}")
+    # What you actually rented, and what it costs. Without this the only way to
+    # find out you were given a card three times the price of the one you asked
+    # for first is the invoice.
+    got = pod.get("gpuTypeId") or "?"
+    rate = pod.get("costPerHr")
+    price = f" at ${rate}/hr" if rate else ""
+    say(f"  running on {got}{price}, reachable at {host}:{mapped}")
     return pod
 
 

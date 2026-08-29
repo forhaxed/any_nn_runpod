@@ -78,6 +78,7 @@ class RunPod:
         cloud_type: str = "SECURE",
         data_centers: list | None = None,
         interruptible: bool = False,
+        gpu_priority: str = "availability",
     ) -> dict:
         """Create a pod and start it.  Returns the pod as RunPod describes it."""
         self._check_gpu_names(gpu_types)
@@ -88,7 +89,10 @@ class RunPod:
             "cloudType": cloud_type,
             "gpuCount": gpu_count,
             "gpuTypeIds": list(gpu_types),
-            "gpuTypePriority": "availability",
+            # "availability" ignores the order of gpuTypeIds and picks whatever
+            # RunPod has most of -- which can be several times the price of the
+            # one you listed first. "custom" honours the order instead.
+            "gpuTypePriority": gpu_priority,
             "containerDiskInGb": container_disk_gb,
             "ports": list(ports),
             "supportPublicIp": True,
