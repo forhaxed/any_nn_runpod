@@ -24,7 +24,7 @@ from any_nn_runpod.link import Link, NotConnected, NullLink, RemoteError
 from any_nn_runpod.local import Local
 from any_nn_runpod.reporting import LoggerWrapper, Reporter
 from any_nn_runpod.runtime import Session, session
-from any_nn_runpod.trainer import RunpodTrainer
+from any_nn_runpod.trainer import RunpodTrainer, seed_everything
 
 __all__ = [
     "AnyEMA",
@@ -38,6 +38,7 @@ __all__ = [
     "Reporter",
     "RunpodTrainer",
     "Session",
+    "seed_everything",
     "session",
 ]
 __version__ = "0.1.0"

@@ -40,6 +40,30 @@ from colorama import Fore, Style
 PAUSE, RESUME, SAVE, EVAL, STOP = "pause", "resume", "save", "eval", "stop"
 
 
+def seed_everything(seed: int):
+    """Seed torch, numpy and python, right now.
+
+    ``trainer.seed`` is applied by ``init()``, which is late: a model built
+    before that -- and most are, since the trainer needs it -- gets its weights
+    from an unseeded generator, and two "identical" runs quietly start from
+    different places. Call this at the top of ``main()`` and the run is
+    reproducible from its first line.
+    """
+    import random as _random
+
+    _random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    try:
+        import numpy
+
+        numpy.random.seed(seed)
+    except ImportError:
+        pass
+    return seed
+
+
 class RunpodTrainer:
     """Subclass this and override ``train_step``."""
 
