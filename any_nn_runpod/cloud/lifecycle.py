@@ -115,11 +115,59 @@ def create(
         cloud_type=recipe.cloud_type,
         data_centers=recipe.data_centers,
     )
-    say(f"  pod {pod['id']} created; waiting for an address...")
-    pod = client.wait_until_ready(pod["id"], ports)
+    say(
+        f"  pod {pod['id']} created; waiting for a machine and an address.\n"
+        f"  (Cold starts pull the image first. Several minutes is normal, and "
+        f"longer on the community cloud.)"
+    )
+    started = time.monotonic()
+    try:
+        pod = client.wait_until_ready(
+            pod["id"], ports, on_wait=_progress(say, started)
+        )
+    except BaseException as problem:
+        # The pod exists and is billing from the moment it is created. If it
+        # never becomes reachable -- no public IP, an image that will not pull,
+        # a timeout, or a Ctrl-C while waiting -- letting the exception out of
+        # here would leave it running with nobody holding a reference to it.
+        # This is the one window where the caller's own cleanup cannot help,
+        # because it has not been handed the pod yet.
+        say(f"  pod {pod['id']} never became reachable; terminating it.")
+        try:
+            client.terminate_pod(pod["id"])
+        except Exception as cleanup:  # noqa: BLE001
+            say(
+                f"  WARNING: could not terminate {pod['id']}: {cleanup}. "
+                f"It is still billing -- end it with `run.py down` or the "
+                f"RunPod console."
+            )
+        raise problem
+
     host, mapped = endpoint(pod, ports[0])
     say(f"  reachable at {host}:{mapped}")
     return pod
+
+
+def _progress(say, started, every=20.0):
+    """Say what a pod is doing while it starts, rather than going quiet.
+
+    Waiting for an address is the longest silent stretch in the whole flow, and
+    a silent stretch is indistinguishable from a hang -- which is how a pod that
+    was merely still pulling its image gets killed for looking stuck.
+    """
+    last = [0.0]
+
+    def report(pod):
+        elapsed = time.monotonic() - started
+        if elapsed - last[0] < every:
+            return
+        last[0] = elapsed
+        state = pod.get("desiredStatus") or "?"
+        placed = "on a machine" if pod.get("machineId") else "not placed yet"
+        address = pod.get("publicIp") or "no address yet"
+        say(f"    {elapsed / 60:.1f} min: {state}, {placed}, {address}")
+
+    return report
 
 
 def find_or_create(client: RunPod, project, recipe, token=None, gpu_types=None, say=print):

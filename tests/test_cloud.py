@@ -120,6 +120,61 @@ def test_the_pod_is_created_with_the_marker_and_no_api_key():
     assert not any("api" in str(value).lower() for value in captured["env"].values())
 
 
+def test_a_pod_that_never_comes_up_is_terminated_rather_than_left_billing():
+    """The one window the caller's own cleanup cannot cover.
+
+    A pod bills from the moment it is created, and ``create`` does not hand it
+    back until it is reachable. If it never becomes reachable -- no public IP,
+    an image that will not pull, a timeout -- and the exception simply escaped,
+    nobody would be holding a reference to a pod that is now running forever.
+    """
+    from any_nn_runpod.manifest import Project, Recipe
+
+    class Stalls(FakeClient):
+        def create_pod(self, **kwargs):
+            self.pods["new"] = {"id": "new", "env": kwargs["env"]}
+            return self.pods["new"]
+
+        def wait_until_ready(self, pod_id, ports, **kwargs):
+            raise RunPodError("never got a public IP")
+
+    client = Stalls([])
+    with pytest.raises(RunPodError, match="never got a public IP"):
+        lifecycle.create(
+            client,
+            Project(pod_name="anr-test"),
+            Recipe(gpu=["NVIDIA GeForce RTX 4090"]),
+            say=lambda _t: None,
+        )
+    assert client.terminated == ["new"], "the stranded pod was left running"
+
+
+def test_a_failure_to_terminate_a_stranded_pod_is_reported_not_hidden():
+    from any_nn_runpod.manifest import Project, Recipe
+
+    class Hopeless(FakeClient):
+        def create_pod(self, **kwargs):
+            self.pods["new"] = {"id": "new", "env": kwargs["env"]}
+            return self.pods["new"]
+
+        def wait_until_ready(self, pod_id, ports, **kwargs):
+            raise RunPodError("never got a public IP")
+
+        def terminate_pod(self, pod_id):
+            raise RunPodError("RunPod is down too")
+
+    said = []
+    with pytest.raises(RunPodError, match="never got a public IP"):
+        lifecycle.create(
+            Hopeless([]),
+            Project(pod_name="anr-test"),
+            Recipe(gpu=["NVIDIA GeForce RTX 4090"]),
+            say=said.append,
+        )
+    # The original problem still surfaces, and the money still gets mentioned.
+    assert any("still billing" in line for line in said), said
+
+
 def test_the_start_command_installs_the_library_and_runs_the_agent():
     command = lifecycle.start_command("git+https://example/repo", (7777, 7778), "sec")
     script = command[-1]
