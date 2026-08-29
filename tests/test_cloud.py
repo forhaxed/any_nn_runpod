@@ -407,9 +407,24 @@ def test_sync_sends_only_the_changed_file_and_removes_stale_ones(pod, tmp_path):
     os.remove(source / "doomed.py")
 
     result = driver.push_remote(pod.link, str(source), say=lambda _t: None)
-    assert result["sent"] == 1                 # not big.bin
-    assert result["bytes"] < 1 << 20           # nowhere near the 2 MiB file
-    assert result["deleted"] == 1
+
+    # If this ever fails, the counts alone say nothing useful -- so say which
+    # files the two sides disagreed about. (This has flaked once, under load,
+    # and was not reproducible in fifteen further runs; the diagnosis is here
+    # rather than a weakened assertion, because the counts are the property.)
+    def disagreement():
+        here = sync.build_manifest(str(source))
+        there = pod.link.call("sync.manifest", timeout=60)["manifest"]
+        return "\n".join(
+            f"    {name}: local={here.get(name)} pod={there.get(name)}"
+            for name in sorted(set(here) | set(there))
+        )
+
+    assert result["sent"] == 1, f"resent more than the edited file:\n{disagreement()}"
+    assert result["bytes"] < 1 << 20, (
+        f"sent {result['bytes']} bytes -- big.bin went again:\n{disagreement()}"
+    )
+    assert result["deleted"] == 1, f"deletion count wrong:\n{disagreement()}"
 
     landed = tmp_path / "workspace"
     assert (landed / "train.py").read_text() == "v2 -- edited"
