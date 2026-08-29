@@ -16,32 +16,62 @@ from tqdm.auto import tqdm
 
 from any_nn_runpod.cloud import lifecycle, sync
 from any_nn_runpod.cloud.api import endpoint
-from any_nn_runpod.link import Link
+from any_nn_runpod.link import Link, LinkError
 from any_nn_runpod.wire.protocol import Channel
 from any_nn_runpod.wire.transport import TcpTransport
 
 
-def connect_supervisor(pod: dict, port: int, token=None, timeout=300.0, say=print):
+def _dial_once(host, mapped, role, info, handshake_timeout=30.0):
+    """One connect-and-handshake attempt, cleaned up if it does not finish.
+
+    Connecting is not the same as being ready. RunPod publishes the port
+    mapping as soon as the pod exists, so the TCP connect succeeds against its
+    edge long before anything inside the container is listening -- and the
+    handshake then hangs until it times out. Treating only connection refusal
+    as "not yet" fails every cold start that gets that far.
+    """
+    channel = Channel(TcpTransport.connect(host, mapped, timeout=15))
+    try:
+        # A bounded handshake, so an accepted-but-silent connection is a retry
+        # rather than a wait forever.
+        channel.transport.socket.settimeout(handshake_timeout)
+        link = Link(channel, role=role)
+        link.start(initiate=True, info=info)
+        channel.transport.socket.settimeout(None)  # blocking for the session
+        return link
+    except BaseException:
+        try:
+            channel.close()
+        except Exception:  # noqa: BLE001
+            pass
+        raise
+
+
+def connect_supervisor(pod: dict, port: int, token=None, timeout=420.0, say=print):
     """Dial the supervisor, waiting out the pod's boot and pip install.
 
     A freshly created pod is reachable long before the supervisor is: the
-    container has to pull the image, then install the library. Refusing on the
-    first connection error would fail every cold start.
+    container has to pull the image, then install the library from git.
     """
     host, mapped = endpoint(pod, port)
     say(f"Connecting to the supervisor at {host}:{mapped}...")
     deadline = time.monotonic() + timeout
-    last = None
+    last, attempts = None, 0
     while time.monotonic() < deadline:
+        attempts += 1
         try:
-            channel = Channel(TcpTransport.connect(host, mapped, timeout=10))
-        except OSError as exc:
+            return _dial_once(
+                host, mapped, "launcher", {"token": token} if token else None
+            )
+        except (OSError, EOFError, LinkError) as exc:
             last = exc
+            if attempts % 6 == 0:
+                say(
+                    f"  still waiting for the supervisor "
+                    f"({(time.monotonic() - deadline + timeout) / 60:.1f} min; "
+                    f"the pod is installing any_nn_runpod)"
+                )
             time.sleep(5.0)
-            continue
-        link = Link(channel, role="launcher")
-        link.start(initiate=True, info={"token": token} if token else None)
-        return link
     raise ConnectionError(
         f"the supervisor on {host}:{mapped} never answered ({timeout:.0f}s, "
         f"last error: {last}).\n"
@@ -132,12 +162,13 @@ def attach_local(app, pod: dict, port: int, timeout=300.0, say=print):
     last = None
     while time.monotonic() < deadline:
         try:
-            channel = Channel(TcpTransport.connect(host, mapped, timeout=10))
-        except OSError as exc:
+            link = _dial_once(host, mapped, "local", None)
+        except (OSError, EOFError, LinkError) as exc:
+            # Same as the supervisor: the port answers before the session has
+            # imported torch and started listening behind it.
             last = exc
             time.sleep(2.0)
             continue
-        link = Link(channel, role="local").start(initiate=True)
         app.attach(link)
         return link
     raise ConnectionError(
