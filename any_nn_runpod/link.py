@@ -262,27 +262,50 @@ class Link:
     def connected(self) -> bool:
         return not self.closed
 
-    def start(self, initiate: bool, info: dict | None = None, timeout: float = 60.0):
+    def start(
+        self,
+        initiate: bool,
+        info: dict | None = None,
+        handshake_timeout: float | None = None,
+    ):
         """Shake hands, then run the reader thread.
 
         ``initiate`` decides who speaks first; it has no other meaning.  The
         side that dialled out says HELLO, the side that was listening replies.
+
+        ``handshake_timeout`` bounds the greeting only, and is cleared before
+        the reader starts.  It has to be: a socket timeout applies to whatever
+        read is in progress, so a reader thread that inherited one would treat
+        the first quiet stretch of a real session -- a model being built, an
+        epoch boundary -- as a dead connection.
         """
         mine = {"role": self.role, "proto": protocol.PROTO_VERSION, **_describe()}
         mine.update(info or {})
+        socket_ = getattr(getattr(self.channel, "transport", None), "socket", None)
 
-        if initiate:
-            self.channel.send(protocol.HELLO, mine)
-            reply = self.channel.recv()
-            if reply.type != protocol.WELCOME:
-                raise LinkError(f"expected WELCOME, got {reply!r}")
-            self.peer = reply.meta
-        else:
-            hello = self.channel.recv()
-            if hello.type != protocol.HELLO:
-                raise LinkError(f"expected HELLO, got {hello!r}")
-            self.peer = hello.meta
-            self.channel.send(protocol.WELCOME, mine)
+        try:
+            if handshake_timeout and socket_ is not None:
+                socket_.settimeout(handshake_timeout)
+
+            if initiate:
+                self.channel.send(protocol.HELLO, mine)
+                reply = self.channel.recv()
+                if reply.type != protocol.WELCOME:
+                    raise LinkError(f"expected WELCOME, got {reply!r}")
+                self.peer = reply.meta
+            else:
+                hello = self.channel.recv()
+                if hello.type != protocol.HELLO:
+                    raise LinkError(f"expected HELLO, got {hello!r}")
+                self.peer = hello.meta
+                self.channel.send(protocol.WELCOME, mine)
+        finally:
+            # Before the reader exists, and on the failure path too.
+            if handshake_timeout and socket_ is not None:
+                try:
+                    socket_.settimeout(None)
+                except OSError:
+                    pass
 
         if self.peer.get("proto") != protocol.PROTO_VERSION:
             raise LinkError(

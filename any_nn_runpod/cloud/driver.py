@@ -32,12 +32,11 @@ def _dial_once(host, mapped, role, info, handshake_timeout=30.0):
     """
     channel = Channel(TcpTransport.connect(host, mapped, timeout=15))
     try:
-        # A bounded handshake, so an accepted-but-silent connection is a retry
-        # rather than a wait forever.
-        channel.transport.socket.settimeout(handshake_timeout)
+        # Bounded, so an accepted-but-silent connection becomes a retry rather
+        # than a wait forever. Link.start clears it before the reader begins --
+        # a session goes quiet for perfectly good reasons.
         link = Link(channel, role=role)
-        link.start(initiate=True, info=info)
-        channel.transport.socket.settimeout(None)  # blocking for the session
+        link.start(initiate=True, info=info, handshake_timeout=handshake_timeout)
         return link
     except BaseException:
         try:

@@ -155,6 +155,40 @@ def test_notifications_are_handled_in_the_order_they_were_sent(pair):
     assert seen == list(range(30))
 
 
+def test_a_handshake_timeout_does_not_outlive_the_handshake():
+    """A bounded greeting must not leave the session on a stopwatch.
+
+    A socket timeout applies to whatever read is in progress, so a reader
+    thread that inherited the handshake's would treat the first quiet stretch
+    of a real run -- a model being built, an epoch boundary -- as a dead link.
+    """
+    listener = TcpListener("127.0.0.1", 0)
+    remote_box = {}
+    accepted = threading.Event()
+
+    def serve():
+        channel = listener.accept(timeout=10)
+        remote_box["link"] = Link(channel, role="remote").start(initiate=False)
+        accepted.set()
+
+    threading.Thread(target=serve, daemon=True).start()
+    transport = TcpTransport.connect("127.0.0.1", listener.port)
+    local = Link(Channel(transport), role="local").start(
+        initiate=True, handshake_timeout=2.0
+    )
+    assert accepted.wait(10)
+
+    try:
+        # Longer than the handshake timeout, and completely silent.
+        time.sleep(3.0)
+        assert local.connected, f"the link died while idle: {local.close_reason}"
+        assert local.ping(timeout=5)
+    finally:
+        local.close("test over")
+        remote_box["link"].close("test over")
+        listener.close()
+
+
 def test_flush_waits_for_queued_notifications_to_be_handled(pair):
     """The barrier that makes it safe to hang up.
 
