@@ -21,6 +21,93 @@ The same `remote/train.py` serves both. It never learns which.
 
 ---
 
+## Setting it up
+
+**1. Install the library, editable.**
+
+```bash
+git clone https://github.com/forhaxed/any_nn_runpod
+cd any_nn_runpod && pip install -e .
+```
+
+Editable matters: `import any_nn_runpod` then resolves to the checkout, so
+edits take effect with no reinstall — new modules included. Only changes to
+`pyproject.toml` (dependencies, entry points) need `pip install -e .` again.
+
+**2. Lay out a project.** It can be anywhere; `run.py --root <dir>` points at it.
+
+```
+myproject/
+  run.py  run.bat  run.sh    copied from the library checkout
+  anr.toml                   paths and pod policy      (gitignore it)
+  .env                       RUNPOD_API_KEY=...        (gitignore it)
+  local/local.py             what this machine offers  (never uploaded)
+  remote/anr.toml            the recipe
+  remote/train.py            the training script       (uploaded whole)
+```
+
+Nothing is mandatory except `remote/` with a recipe and an entry script. With
+no `local/local.py` the run is standalone, which is a supported mode.
+
+**3. Get a RunPod API key** from
+[console.runpod.io](https://console.runpod.io/user/settings) → API Keys, and
+put it in `.env` at the project root:
+
+```
+RUNPOD_API_KEY=rpa_...
+```
+
+It stays there. It is never put in a pod's environment — see *Pods and money*.
+
+**4. Point the pod at a copy of this library it can reach.** In `anr.toml`:
+
+```toml
+[pod]
+library_source = "git+https://github.com/YOU/any_nn_runpod.git"
+```
+
+This is the one setting that is easy to miss and confusing to debug. A pod
+installs the library from git on boot, so **`run.py start` runs whatever is
+pushed, not what is in your working tree**. `run.py local` runs your working
+tree. When the two disagree, the pod is running the old code:
+
+```bash
+git -C <library> status --short           # uncommitted?
+git -C <library> diff --stat origin/master  # unpushed?
+```
+
+Edits to `remote/*` are different — those are uploaded on every `run.py start`
+and need no commit.
+
+**5. Check it works before renting anything.**
+
+```bash
+python run.py local
+```
+
+That builds the environment the recipe asks for, runs the entry script, and
+attaches `local/local.py` — the same steps `start` takes on a pod, over
+loopback. Almost everything that can go wrong on a pod goes wrong here first,
+for free.
+
+## Commands
+
+```
+run.py local  [--no-link] [--rebuild] [--port N]   train here, no pod
+run.py gpus   [--limit N]                          what exists, and what it costs
+run.py up     [--gpu A,B] [--cloud SECURE|COMMUNITY]        create the pod only
+run.py start  [--gpu A,B] [--cloud ...] [--no-link]
+              [--rebuild] [--on-finish terminate|stop|keep] [--yes]
+run.py ps                                          pods this tool created
+run.py down   [--all] [--action terminate|stop] [--yes]
+```
+
+`--gpu` takes several, comma-separated: RunPod takes whichever is free, and
+"no instances currently available" is the usual answer to a single choice.
+`--rebuild` throws the cached environment away and builds it again.
+
+---
+
 ## The idea
 
 The dataset stays on your machine. The logs and the checkpoints come back to
@@ -84,6 +171,16 @@ A run writes its output **beside** `remote/`, never inside it. That is what
 lets the upload have no exceptions -- and it stops a checkpoint from being
 deleted as stale by the next sync, which is what would happen to anything
 written into a directory kept in step with your copy.
+
+Reach anything you shipped with `session.path()`, which means the same thing
+here and on the pod:
+
+```python
+model = Transformer.from_pretrained(session.path("weights", "base"))
+```
+
+A 8 GB directory of weights in `remote/` is uploaded once. Later runs hash it,
+see it has not changed, and send nothing.
 
 ---
 
@@ -214,45 +311,90 @@ gpu_priority = "availability"
 container_disk_gb = 60
 ```
 
+Every `[pod]` field: `image`, `gpu`, `gpu_priority`, `gpu_count`,
+`container_disk_gb`, `volume_gb`, `network_volume_id`, `cloud_type`
+(`SECURE`/`COMMUNITY`), `data_centers`, `env`. `[env]` also takes
+`torchvision` and `torchaudio`.
+
 `anr.toml` in the project root -- paths and pod policy. Never uploaded.
 
 ```toml
 [paths]
-local = "local"
-remote = "remote"
-output = "local/out"
+local = "local"             # local/local.py lives here
+remote = "remote"           # uploaded whole
+output = "local/out"        # where a linked run's results land
 
 [pod]
-name = "anr"
+name = "anr"                # pods are found and reused by this name
 on_finish = "terminate"     # terminate | stop | keep
-max_hours = 12
+max_hours = 12              # 0 to disable
+library_source = "git+https://github.com/YOU/any_nn_runpod.git"
 ```
 
-`.env` holds `RUNPOD_API_KEY`. **It stays on your machine and is never put in a
-pod's environment** -- a pod is rented from strangers, and a key that can create
-and delete pods is not something to leave on one. Pods are therefore ended from
-here.
+### Where output goes
 
-## What happened to easy_nn
+| run | output lands in |
+|---|---|
+| `run.py local` | `local/out/` (`[paths] output`) |
+| `run.py local --no-link` | `out/`, beside `remote/` |
+| `run.py start` | `local/out/` on **your** machine |
+| `run.py start --no-link` | `/workspace/out` on the pod, beside `remote/` |
 
-`easy_nn` shipped your trainer to the pod as pickled bytecode, which bought
-"the executor runs any script" at a steep price: Python and torch had to match
-to the minor version on both sides, the pod rebuilt its own interpreter to make
-that true, and the model was uploaded again on every run.
+Never inside `remote/`: that directory is kept in step with your copy, so
+anything written into it would be deleted as stale by the next sync.
 
-Here `remote/` is deployed as files and imported normally. No bytecode crosses,
-so nothing has to match; the recipe says what to install and that is that. What
-survived is the part that was actually valuable: the tensor-aware codec, the
-framed protocol, and credit-based flow control.
+## Pods and money
+
+Every pod this tool creates carries `ANR_MANAGED=1`. Nothing here will list,
+stop or terminate a pod without that marker, so **pods you made yourself are
+invisible to it** — including one that happens to share the project's name.
+`run.py ps` says how many others exist without showing them.
+
+`RUNPOD_API_KEY` stays on your machine and is never put in a pod's environment:
+a pod is rented from strangers and runs code pulled from the internet, and a
+key that can create and delete pods is not something to leave on one. The
+consequence is that pods are ended from here, by three things:
+
+* the run reports finished or failed → `on_finish` decides what that means;
+* Ctrl-C → it asks, unless `--yes`;
+* `max_hours`, or the link going quiet with no bytes moving either way.
+
+The honest gap: if **your** machine dies, the pod keeps running. So:
+
+```bash
+python run.py ps          # what is up, and what it costs
+python run.py down --all  # end all of them -- still only the managed ones
+```
+
+A run with no local side is never terminated automatically, whatever
+`on_finish` says: its output exists only on that pod, so it is stopped instead.
+
+## Reproducibility
+
+`trainer.seed` is applied by `init()`, which is after your model exists. Seed
+before building it:
+
+```python
+from any_nn_runpod import seed_everything
+seed_everything(0)          # first line of main()
+```
+
+Two runs on one machine are then bit-identical -- same scalars, same weights.
+Across machines they are not, and cannot be: a different GPU and a different
+torch build reduce in a different order. Measured on this example, same seed,
+RTX 5090 vs A40: identical at step 0, ~1e-2 apart on loss after 1248 steps.
 
 ## Development
 
 ```bash
 pip install -e .
-pytest              # 93 tests, ~30s, no GPU and no RunPod account needed
+pytest              # 100 tests, ~30s, no GPU and no RunPod account needed
 ```
 
 The tests cover the whole pipeline except the RunPod REST calls themselves:
 the supervisor runs over loopback exactly as it does on a pod, and the rule
 that only pods this tool created are ever touched is checked against pod
 records rather than against an account.
+
+Verified against real pods: a training run end to end with batches streamed
+from the local machine, and incremental sync across five pods at once.
