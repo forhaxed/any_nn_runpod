@@ -155,6 +155,38 @@ def test_notifications_are_handled_in_the_order_they_were_sent(pair):
     assert seen == list(range(30))
 
 
+def test_a_silent_caller_cannot_wedge_a_listener():
+    """A connection that never greets must not hold the server forever.
+
+    The supervisor's port is on a public IP, so anything at all connects to it:
+    port scanners, health checks, half-open sockets. Without a bounded greeting
+    the accept loop parks on the first one and the pod is deaf to its launcher
+    for the rest of its life.
+    """
+    import socket as socket_module
+
+    listener = TcpListener("127.0.0.1", 0)
+    outcome = {}
+
+    def serve():
+        channel = listener.accept(timeout=10)
+        try:
+            Link(channel, role="remote").start(initiate=False, handshake_timeout=0.5)
+        except BaseException as exc:  # noqa: BLE001
+            outcome["error"] = exc
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+
+    rude = socket_module.create_connection(("127.0.0.1", listener.port), timeout=5)
+    thread.join(timeout=15)
+    rude.close()
+    listener.close()
+
+    assert not thread.is_alive(), "the listener is still waiting to be greeted"
+    assert outcome.get("error") is not None
+
+
 def test_a_handshake_timeout_does_not_outlive_the_handshake():
     """A bounded greeting must not leave the session on a stopwatch.
 

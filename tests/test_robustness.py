@@ -13,13 +13,13 @@ import time
 
 import pytest
 import torch
-from torch.utils.data import DataLoader, TensorDataset
+
 
 from any_nn_runpod.dataset import DatasetWrapper
 from any_nn_runpod.link import RemoteError
 from any_nn_runpod.local import Local
 from any_nn_runpod.reporting import LoggerWrapper
-from test_pipeline import TinyTrainer, Wired, build_trainer, make_loader
+from test_pipeline import Wired, build_trainer, make_loader
 
 
 @pytest.fixture

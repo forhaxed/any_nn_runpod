@@ -171,7 +171,15 @@ class Supervisor:
 
     def _serve_one(self, channel):
         link = Link(channel, role="supervisor")
-        link.start(initiate=False, info={"workspace": self.workspace})
+        # Bounded, because this port is on a public IP: anything that connects
+        # and then says nothing -- a port scanner, a health check, a half-open
+        # connection -- would otherwise hold this loop forever, and the pod
+        # would be deaf to the launcher for the rest of its life.
+        link.start(
+            initiate=False,
+            info={"workspace": self.workspace},
+            handshake_timeout=30.0,
+        )
 
         if self.token and link.peer.get("token") != self.token:
             print("rejecting a client with a bad token", file=sys.stderr, flush=True)

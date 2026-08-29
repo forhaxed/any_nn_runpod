@@ -9,12 +9,11 @@ is left to go wrong is only the part that needs a pod.
 
 from __future__ import annotations
 
-import os
 import time
 
 from tqdm.auto import tqdm
 
-from any_nn_runpod.cloud import lifecycle, sync
+from any_nn_runpod.cloud import sync
 from any_nn_runpod.cloud.api import endpoint
 from any_nn_runpod.link import Link, LinkError
 from any_nn_runpod.wire.protocol import Channel
@@ -145,7 +144,9 @@ def start_session(link, recipe, python, no_link: bool, say=print) -> dict:
         {
             "entry": recipe.entry,
             "python": python,
-            "output_dir": None if not no_link else recipe.output_dir,
+            # Only meaningful without a link; with one, output goes home and
+            # the pod writes nothing.
+            "output_dir": recipe.output_dir if no_link else None,
             "no_link": no_link,
             "wait": 300,
         },
@@ -191,9 +192,14 @@ def relay_output(link, console, deadline=None):
 def describe(pod: dict) -> str:
     machine = pod.get("machine") or {}
     gpu = pod.get("gpuTypeId") or machine.get("gpuTypeId") or "?"
+    # Every field defaulted and stringified: this is used by `ps` and by the
+    # confirmation before `down`, and a pod with an unexpected shape must still
+    # be printable. Failing to format a line is a poor reason not to show
+    # someone what is about to be terminated.
     return (
-        f"{pod.get('id')}  {pod.get('name'):<20} {gpu:<28} "
-        f"{pod.get('desiredStatus', '?'):<10} {pod.get('publicIp') or '-'}"
+        f"{pod.get('id') or '?':<16}  {str(pod.get('name') or '?'):<20} "
+        f"{str(gpu):<28} {str(pod.get('desiredStatus') or '?'):<10} "
+        f"{pod.get('publicIp') or '-'}"
     )
 
 
@@ -202,6 +208,3 @@ def workspace_hint(remote_dir: str) -> str:
     total = sum(size for size, _ in files.values())
     return f"{len(files)} files, {total / (1 << 20):.1f} MiB"
 
-
-def output_dir_for(project) -> str:
-    return os.path.abspath(project.output_path)

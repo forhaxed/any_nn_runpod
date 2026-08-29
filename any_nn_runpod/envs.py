@@ -121,6 +121,16 @@ def resolve(
     create = uv + ["venv", directory]
     if recipe.get("python"):
         create += ["--python", str(recipe["python"])]
+
+    # A recipe that names packages but not a torch version means "what is
+    # already here, plus these". Building an isolated venv for that gives you
+    # an environment with no torch at all -- or whatever version some package
+    # happened to depend on -- while the perfectly good CUDA build in the pod's
+    # image sits one directory away, ignored. So the base environment stays
+    # visible unless the recipe is specifically replacing torch.
+    if _inherits_base(recipe):
+        create += ["--system-site-packages"]
+        say("  (inheriting the base environment: the recipe pins no torch)")
     _run(create, say, "creating the venv")
 
     torch_packages = []
@@ -153,6 +163,17 @@ def resolve(
         json.dump(recipe, handle, indent=2, default=str)
     say(f"Environment ready in {time.perf_counter() - started:.0f}s: {directory}")
     return python
+
+
+def _inherits_base(recipe: dict) -> bool:
+    """Should a built venv still see the environment it was built from?
+
+    Yes, unless the recipe is replacing the interpreter or torch itself.  A
+    recipe that names packages but no torch version means "what is already
+    here, plus these", and isolating that produces an environment with no torch
+    in it at all.
+    """
+    return not recipe.get("torch") and not recipe.get("python")
 
 
 def venv_python(directory: str) -> str:

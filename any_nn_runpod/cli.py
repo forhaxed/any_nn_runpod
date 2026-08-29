@@ -376,8 +376,25 @@ def command_down(project, args) -> int:
         _say("Left alone.")
         return 0
 
+    failed = []
     for pod in ours:
-        lifecycle.finish(client, pod["id"], args.action, say=lambda t: _say("  " + t))
+        try:
+            lifecycle.finish(
+                client, pod["id"], args.action, say=lambda t: _say("  " + t)
+            )
+        except Exception as exc:  # noqa: BLE001
+            # Keep going. This is the command someone runs when they want the
+            # billing to stop, and stopping at the first awkward pod would
+            # leave the rest running for no reason.
+            failed.append((pod["id"], exc))
+            _say(f"  {Fore.RED}{pod['id']}: {exc}{Style.RESET_ALL}")
+
+    if failed:
+        _say(
+            f"\n{Fore.RED}{len(failed)} pod(s) could not be ended and are still "
+            f"billing. Try again, or use the RunPod console.{Style.RESET_ALL}"
+        )
+        return 1
     return 0
 
 
@@ -413,7 +430,12 @@ def command_start(project, args) -> int:
 
     control = None
     app = None
-    outcome = "kept"
+    # "failed" until something says otherwise. The pod is ended in the finally
+    # either way, but the outcome is also what gets *reported* -- and starting
+    # from an optimistic value meant a run that died connecting announced
+    # itself as "Run kept", which is a lie about the one thing you were
+    # watching for.
+    outcome = "failed"
     try:
         control = driver.connect_supervisor(pod, project.ports[0], token=token, say=_say)
 
@@ -428,7 +450,7 @@ def command_start(project, args) -> int:
         _say(f"  python: {python}")
 
         use_link = not args.no_link and project.has_local
-        if app is None and use_link:
+        if use_link:
             app = _load_local_app(project)
 
         _heading("Session")
@@ -441,8 +463,7 @@ def command_start(project, args) -> int:
         else:
             driver.attach_local(app, pod, project.ports[1], say=_say)
             _heading("Training")
-            app.wait()
-            outcome = "failed" if app.failure else "finished"
+            outcome = _wait_attached(app, control, deadline)
             _report_run(app)
     except KeyboardInterrupt:
         _say(f"\n{Fore.YELLOW}Interrupted.{Style.RESET_ALL}")
@@ -456,6 +477,39 @@ def command_start(project, args) -> int:
         if control is not None:
             control.close("launcher done")
     return code
+
+
+def _wait_attached(app, control, deadline) -> str:
+    """Wait out an attached run, but not forever.
+
+    ``app.wait()`` alone blocks until the run ends or the link dies, which
+    means a pod that wedges keeps billing until somebody notices. So the wait
+    happens in slices with ``max_hours`` and the idle timeout checked between
+    them -- the whole reason those settings exist.
+
+    Liveness is measured in bytes over the link, not in messages: a run
+    uploading a large checkpoint is silent for minutes and perfectly healthy.
+    """
+    seen = app.traffic()
+    while True:
+        if app.wait(timeout=15.0) or app.failure:
+            return "failed" if app.failure else "finished"
+        if app.link is None or not app.link.connected:
+            return "failed" if app.failure else "finished"
+
+        moved = app.traffic()
+        if moved != seen:
+            seen = moved
+            deadline.saw_progress()
+
+        expired = deadline.expired()
+        if expired:
+            _say(f"\n{Fore.YELLOW}Ending the run: {expired}.{Style.RESET_ALL}")
+            try:
+                control.call("run.stop", timeout=60)
+            except Exception as exc:  # noqa: BLE001 -- the pod goes either way
+                _say(f"  (could not stop the session cleanly: {exc})")
+            return "expired"
 
 
 def _wait_standalone(control, deadline) -> str:

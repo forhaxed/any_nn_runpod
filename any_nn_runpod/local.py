@@ -179,6 +179,21 @@ class Local:
     def log_dir(self) -> str:
         return self.board.log_dir
 
+    def traffic(self) -> int:
+        """Bytes moved over the link so far, in both directions.
+
+        This is what "still alive" should be measured by, rather than by
+        messages arriving: a run uploading an 8 GB checkpoint sends nothing for
+        a quarter of an hour and is working the whole time, while a run whose
+        pod has wedged moves no bytes at all.
+        """
+        transport = getattr(getattr(self.link, "channel", None), "transport", None)
+        if transport is None:
+            return 0
+        return int(getattr(transport, "bytes_sent", 0)) + int(
+            getattr(transport, "bytes_received", 0)
+        )
+
     # ================================================================
     #  Handlers
     # ================================================================

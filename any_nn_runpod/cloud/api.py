@@ -113,12 +113,6 @@ class RunPod:
     def get_pod(self, pod_id: str) -> dict:
         return self._request("GET", f"/pods/{pod_id}")
 
-    def find_pod(self, name: str) -> dict | None:
-        for pod in self.list_pods():
-            if pod.get("name") == name:
-                return pod
-        return None
-
     def stop_pod(self, pod_id: str) -> dict:
         """Stop the container but keep the pod and its disk.  Still billed for storage."""
         return self._request("POST", f"/pods/{pod_id}/stop")

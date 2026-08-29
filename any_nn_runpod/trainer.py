@@ -121,7 +121,16 @@ class RunpodTrainer:
         Counted in batches, because that is what the loop consumes and what a
         streamed dataset can honestly report.
         """
-        batches = len(self.train_dataloader)
+        try:
+            batches = len(self.train_dataloader)
+        except TypeError as exc:
+            raise TypeError(
+                f"{type(self.train_dataloader).__name__} has no length, so the "
+                "number of steps in a run cannot be worked out.\n"
+                "An IterableDataset does this. Either give its DataLoader a "
+                "__len__, or wrap it: DatasetWrapper takes its length from the "
+                "machine that owns the data, which usually does know."
+            ) from exc
         return max(1, (batches // self.gradient_accumulation_steps) * self.repeats)
 
     @property

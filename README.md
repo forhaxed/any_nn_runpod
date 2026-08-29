@@ -230,7 +230,7 @@ framed protocol, and credit-based flow control.
 
 ```bash
 pip install -e .
-pytest              # 81 tests, ~25s, no GPU and no RunPod account needed
+pytest              # 93 tests, ~30s, no GPU and no RunPod account needed
 ```
 
 The tests cover the whole pipeline except the RunPod REST calls themselves:

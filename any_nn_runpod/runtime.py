@@ -111,7 +111,12 @@ def serve(entry: str, host: str, port: int, output_dir: str, wait: float | None)
                 flush=True,
             )
         else:
-            link = Link(channel, role="remote").start(initiate=False)
+            # Bounded for the same reason as the supervisor's: a connection
+            # that never greets must not hold the session before it has run a
+            # single step.
+            link = Link(channel, role="remote").start(
+                initiate=False, handshake_timeout=60.0
+            )
 
     workdir = os.path.dirname(os.path.abspath(entry))
     session = Session(link, output_dir=output_dir, workdir=workdir)
