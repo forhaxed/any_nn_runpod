@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "any_nn_runpod"
+version = "0.1.0"
+description = "A deliberate pipeline: write remote/, ship it to a pod, keep the data and the logs at home."
+requires-python = ">=3.10"
+dependencies = [
+    "torch",
+    "accelerate",
+    "tqdm",
+    "colorama",
+    "tensorboard",
+    "requests",
+]
+
+[project.optional-dependencies]
+compress = ["zstandard"]
+
+[project.scripts]
+anr = "any_nn_runpod.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["any_nn_runpod*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

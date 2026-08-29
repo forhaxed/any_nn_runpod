@@ -1,0 +1,17 @@
+# The recipe. It travels with the code, so the same file builds the environment
+# on your machine for `run.py local` and on the pod for `run.py start`.
+
+[run]
+entry = "train.py"
+output_dir = "out"        # only used when there is no local side
+
+[env]
+# Leave python/torch unset to accept whatever is already here. Pin them when
+# the run needs a specific pair, and uv will build exactly that -- downloading
+# a standalone CPython if the machine has none.
+requirements = ["torchvision"]
+
+[pod]
+image = "runpod/pytorch:0.7.0-dev-cu1281-torch271-ubuntu2204"
+gpu = ["NVIDIA GeForce RTX 4090", "NVIDIA RTX A5000"]
+container_disk_gb = 40
