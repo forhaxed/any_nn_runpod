@@ -61,10 +61,13 @@ def command_local(project: Project, args) -> int:
         )
 
     port = args.port or _free_port()
-    output_dir = (
-        os.path.abspath(project.output_path)
+    # Beside remote/, never inside it: remote/ is the thing that gets uploaded
+    # and kept in step with the far side, so a run writing into it would put
+    # its own checkpoints in line to be deleted as stale.
+    output_dir = os.path.abspath(
+        project.output_path
         if use_link
-        else os.path.join(project.remote_path, recipe.output_dir)
+        else os.path.join(project.root, recipe.output_dir)
     )
 
     command = [
@@ -428,6 +431,7 @@ def command_start(project, args) -> int:
     )
     deadline = lifecycle.Deadline(project.max_hours)
 
+    use_link = not args.no_link and project.has_local
     control = None
     app = None
     # "failed" until something says otherwise. The pod is ended in the finally
@@ -449,7 +453,6 @@ def command_start(project, args) -> int:
         )
         _say(f"  python: {python}")
 
-        use_link = not args.no_link and project.has_local
         if use_link:
             app = _load_local_app(project)
 
@@ -473,7 +476,9 @@ def command_start(project, args) -> int:
             app.shutdown()
             if app.link is not None:
                 app.link.close("launcher done")
-        code = _finish_pod(client, pod, project, outcome, args, deadline)
+        code = _finish_pod(
+            client, pod, project, outcome, args, deadline, had_local=use_link
+        )
         if control is not None:
             control.close("launcher done")
     return code
@@ -526,11 +531,25 @@ def _wait_standalone(control, deadline) -> str:
     return "finished" if exited.get("code") == 0 else "failed"
 
 
-def _finish_pod(client, pod, project, outcome, args, deadline) -> int:
+def _finish_pod(client, pod, project, outcome, args, deadline, had_local=True) -> int:
     from any_nn_runpod.cloud import lifecycle
 
     policy = args.on_finish or project.on_finish
     _heading(f"Run {outcome} after {deadline.elapsed_hours:.2f}h")
+
+    if not had_local and policy == "terminate" and not args.on_finish:
+        # With no local side, everything the run produced -- checkpoints,
+        # TensorBoard, the lot -- exists only on the pod. Terminating destroys
+        # it. Stopping keeps /workspace, which is a volume, and releases the
+        # GPU. An explicit --on-finish terminate still wins: that is someone
+        # saying they know.
+        policy = "stop"
+        _say(
+            f"{Fore.YELLOW}This run had no local side, so its output only "
+            f"exists on the pod. Stopping instead of terminating, to keep it.\n"
+            f"  Collect it, then `run.py down`. Pass --on-finish terminate to "
+            f"discard it instead.{Style.RESET_ALL}"
+        )
 
     if outcome == "interrupted" and not args.yes:
         policy = _ask_policy(pod, policy)

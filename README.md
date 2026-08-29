@@ -75,7 +75,15 @@ def samples(payload, ctx):          # every handler is (payload, ctx)
 ```
 
 `local/` is never uploaded. `remote/` is uploaded whole -- put weights in it if
-you want them there.
+you want them there. "Whole" means whole: the only things left behind are
+`__pycache__`, `.git`, virtualenvs and tool caches, all of them machine-made
+and regenerable. A directory you named yourself always travels, whatever it is
+called.
+
+A run writes its output **beside** `remote/`, never inside it. That is what
+lets the upload have no exceptions -- and it stops a checkpoint from being
+deleted as stale by the next sync, which is what would happen to anything
+written into a directory kept in step with your copy.
 
 ---
 
@@ -172,6 +180,13 @@ unchanged. Give the wrapper a `fallback=` and this mode works:
 ```python
 DatasetWrapper("train", precache=48, fallback=lambda: DataLoader(...))
 ```
+
+On a pod, a run with no local side keeps everything it produced **on the pod** --
+that is the whole difference. So `run.py start --no-link` will not terminate it
+afterwards however `on_finish` is set: it stops the pod instead, which releases
+the GPU and keeps `/workspace`. Collect what you want, then `run.py down`.
+Passing `--on-finish terminate` explicitly still terminates, on the grounds
+that you said so.
 
 ## Configuration
 

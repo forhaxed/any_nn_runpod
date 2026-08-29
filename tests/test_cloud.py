@@ -195,17 +195,42 @@ def write(root, relative, content):
     return path
 
 
-def test_the_manifest_skips_what_should_never_be_uploaded(tmp_path):
+def test_a_directory_you_named_yourself_always_travels(tmp_path):
+    """``remote/`` goes up whole. "out" is not a reserved word.
+
+    A run's output was once excluded here, because it was written inside
+    remote/. That made the contract a lie: a directory of yours called ``out``
+    -- weights, samples, anything -- silently stayed at home. Output is written
+    beside remote/ now, so nothing about the upload has to know the name.
+    """
     root = str(tmp_path)
     write(root, "train.py", "print(1)")
-    write(root, "weights/model.bin", b"\x00" * 1024)
-    write(root, "__pycache__/train.cpython-311.pyc", b"junk")
-    write(root, "out/logs/events.0", b"junk")
-    write(root, ".git/config", b"junk")
-    write(root, "notes.py~", b"junk")
+    write(root, "out/weights.bin", b"\x00" * 128)
+    write(root, "output/notes.txt", "mine")
+    write(root, "data/set.bin", b"\x00" * 64)
 
     manifest = sync.build_manifest(root)
-    assert set(manifest) == {"train.py", "weights/model.bin"}
+    assert set(manifest) == {
+        "train.py",
+        "out/weights.bin",
+        "output/notes.txt",
+        "data/set.bin",
+    }
+
+
+def test_only_machine_generated_directories_are_skipped(tmp_path):
+    root = str(tmp_path)
+    write(root, "train.py", "print(1)")
+    for junk in (
+        "__pycache__/train.cpython-311.pyc",
+        ".git/config",
+        ".venv/pyvenv.cfg",
+        ".pytest_cache/x",
+    ):
+        write(root, junk, b"junk")
+    write(root, "notes.py~", b"junk")
+
+    assert set(sync.build_manifest(root)) == {"train.py"}
 
 
 def test_a_plan_sends_only_what_differs(tmp_path):
@@ -367,6 +392,26 @@ def pod(tmp_path):
     running = Pod(str(tmp_path / "workspace"))
     yield running
     running.close()
+
+
+def test_a_standalone_run_writes_beside_the_workspace_not_into_it(pod, tmp_path):
+    """Output must not land inside the directory that gets synced.
+
+    remote/ is kept in step with the local copy, so a checkpoint written into
+    it is a file the next sync sees as stale and deletes. Writing beside it
+    also means the upload needs no exception for a directory name.
+    """
+    workspace = pod.supervisor.workspace
+    chosen = pod.supervisor._output_dir(None)
+
+    assert not chosen.startswith(workspace.rstrip("/\\") + os.sep)
+    assert os.path.dirname(chosen) == os.path.dirname(workspace.rstrip("/\\"))
+    assert os.path.basename(chosen) == "out"
+
+    # And a recipe that names something else still lands beside, not inside.
+    named = pod.supervisor._output_dir("results")
+    assert os.path.basename(named) == "results"
+    assert not named.startswith(workspace.rstrip("/\\") + os.sep)
 
 
 def test_the_supervisor_describes_itself(pod):

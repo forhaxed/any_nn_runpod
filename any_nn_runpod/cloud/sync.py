@@ -17,10 +17,14 @@ from __future__ import annotations
 import hashlib
 import os
 
-#: Never uploaded: caches, outputs, and the environment's own droppings.
-#: Deliberately short. ``remote/`` goes up whole -- that is the contract, and
-#: it is what lets weights sit beside the script that loads them. Anything
-#: cleverer here would eventually refuse to upload the very file the run needs.
+#: The only things not uploaded, and every one of them is machine-generated
+#: and regenerable. ``remote/`` goes up whole -- that is the contract, and a
+#: directory you created and named yourself always travels.
+#:
+#: A run's output used to be excluded here too, because it was written inside
+#: ``remote/``. That was the wrong fix for the wrong problem: it made the
+#: contract a lie, and it meant a directory of yours called ``out`` silently
+#: stayed at home. Output is written *beside* ``remote/`` instead.
 IGNORE_DIRS = {
     "__pycache__",
     ".git",
@@ -29,7 +33,6 @@ IGNORE_DIRS = {
     ".pytest_cache",
     ".mypy_cache",
     ".ipynb_checkpoints",
-    "out",
 }
 IGNORE_SUFFIXES = (".pyc", ".pyo", ".swp", "~")
 

@@ -311,7 +311,7 @@ class Supervisor:
             "--entry",
             entry,
             "--output-dir",
-            payload.get("output_dir") or os.path.join(self.workspace, "out"),
+            self._output_dir(payload.get("output_dir")),
         ]
         command += (
             ["--no-link"]
@@ -343,6 +343,18 @@ class Supervisor:
         )
         self._pump.start()
         return {"pid": self.child.pid, "session_port": self.session_port}
+
+    def _output_dir(self, requested) -> str:
+        """Where a run writes when there is no local side to write to.
+
+        Beside the workspace, never inside it. ``remote/`` is uploaded whole
+        and its far side is kept in step with yours -- a run writing into it
+        would put checkpoints in line to be deleted as stale on the next sync,
+        and would force the upload to carve out an exception for a directory
+        name you might well be using for something else.
+        """
+        beside = os.path.dirname(self.workspace.rstrip("/\\")) or "/"
+        return os.path.join(beside, requested or "out")
 
     def _run_status(self, _payload=None):
         return {
