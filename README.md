@@ -190,7 +190,7 @@ torch_index = "https://download.pytorch.org/whl/cu128"
 requirements = ["diffusers==0.37.1", "transformers==5.2.0"]
 
 [pod]
-image = "runpod/pytorch:0.7.0-dev-cu1281-torch271-ubuntu2204"
+image = "runpod/pytorch:1.1.0-cu1290-torch291-ubuntu2204"
 gpu = ["NVIDIA GeForce RTX 4090"]
 container_disk_gb = 60
 ```
@@ -230,6 +230,10 @@ framed protocol, and credit-based flow control.
 
 ```bash
 pip install -e .
-pytest                                          # 56 tests, ~18s, no GPU needed
-python run.py --root examples/cifar local       # the example, end to end
+pytest              # 81 tests, ~25s, no GPU and no RunPod account needed
 ```
+
+The tests cover the whole pipeline except the RunPod REST calls themselves:
+the supervisor runs over loopback exactly as it does on a pod, and the rule
+that only pods this tool created are ever touched is checked against pod
+records rather than against an account.

@@ -59,14 +59,20 @@ def start_command(library_source: str, ports: tuple, token: str | None) -> list:
     Installing the library from git at boot is what makes any stock image work:
     the pod needs no custom build, and it picks up whatever is on the branch.
     """
-    install = library_source or "git+https://github.com/forhaxed/any_nn_runpod"
+    install = library_source or "git+https://github.com/forhaxed/any_nn_runpod.git"
     environment = f"ANR_PORT={ports[0]} ANR_SESSION_PORT={ports[1]}"
     if token:
         environment += f" ANR_TOKEN={token}"
+    # A `git+` source needs git, and not every stock image ships it. Installing
+    # it on the second attempt turns "the pod booted and died silently" into a
+    # pod that comes up anyway -- and costs nothing on images that have it.
+    pip = f"pip install --no-cache-dir --upgrade '{install}'"
     return [
         "bash",
         "-lc",
-        f"pip install --no-cache-dir --upgrade '{install}' && "
+        f"echo '[anr] installing any_nn_runpod from {install}'; "
+        f"({pip} || (apt-get update -qq && apt-get install -y -qq git && {pip})) && "
+        f"echo '[anr] starting supervisor' && "
         f"{environment} python -m any_nn_runpod.agent",
     ]
 
@@ -88,7 +94,11 @@ def create(
         )
 
     ports = tuple(project.ports)
-    say(f"Creating pod {project.pod_name!r} ({recipe.image}) on {gpus[0]}...")
+    say(
+        f"Creating pod {project.pod_name!r} ({recipe.image}) on "
+        + (gpus[0] if len(gpus) == 1 else f"{len(gpus)} candidate GPUs: {gpus[0]}, ...")
+        + f" [{recipe.cloud_type}]..."
+    )
     pod = client.create_pod(
         name=project.pod_name,
         image=recipe.image,

@@ -43,7 +43,7 @@ class Recipe:
     requirements: list = field(default_factory=list)
 
     # -- pod --------------------------------------------------------
-    image: str = "runpod/pytorch:0.7.0-dev-cu1281-torch271-ubuntu2204"
+    image: str = "runpod/pytorch:1.1.0-cu1290-torch291-ubuntu2204"
     gpu: list = field(default_factory=list)
     gpu_count: int = 1
     container_disk_gb: int = 60

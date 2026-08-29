@@ -49,6 +49,7 @@ class RunPod:
                 "https://console.runpod.io/user/settings -> API Keys."
             )
         self.timeout = timeout
+        self._creatable = None
         self._session = requests.Session()
         self._session.headers.update(
             {
@@ -79,6 +80,7 @@ class RunPod:
         interruptible: bool = False,
     ) -> dict:
         """Create a pod and start it.  Returns the pod as RunPod describes it."""
+        self._check_gpu_names(gpu_types)
         body = {
             "name": name,
             "imageName": image,
@@ -166,6 +168,44 @@ class RunPod:
             time.sleep(3.0)
 
     # ================================================================
+    #  What can actually be asked for
+    # ================================================================
+    def creatable_gpu_ids(self) -> set:
+        """GPU ids ``POST /pods`` will accept, straight from its own schema.
+
+        The catalogue and the create endpoint do not agree: GraphQL lists every
+        GPU RunPod knows about, while the REST schema pins ``gpuTypeIds`` to a
+        shorter enum.  Asking for one of the difference produces a schema error
+        with no hint as to which field was wrong, so it is worth reading the
+        spec and saying so plainly instead.
+        """
+        if self._creatable is None:
+            try:
+                response = self._session.get(REST + "/openapi.json", timeout=self.timeout)
+                schema = _json(response)["components"]["schemas"]["PodCreateInput"]
+                enum = schema["properties"]["gpuTypeIds"]["items"]["enum"]
+                self._creatable = set(enum)
+            except Exception:  # noqa: BLE001 -- validation is a courtesy, not a gate
+                self._creatable = set()
+        return self._creatable
+
+    def _check_gpu_names(self, wanted):
+        known = self.creatable_gpu_ids()
+        if not known:
+            return
+        unknown = [name for name in wanted if name not in known]
+        if not unknown:
+            return
+        if len(unknown) == len(wanted):
+            raise RunPodError(
+                "None of these GPU types can be requested when creating a pod: "
+                + ", ".join(repr(name) for name in unknown)
+                + ".\nRun `run.py gpus` -- it marks which ones are usable. "
+                "(RunPod's catalogue lists more GPUs than its create endpoint "
+                "accepts.)"
+            )
+
+    # ================================================================
     #  GPU catalogue (GraphQL only)
     # ================================================================
     def gpu_types(self) -> list:
@@ -208,6 +248,9 @@ class RunPod:
                     "community": bool(entry.get("communityCloud")),
                 }
             )
+        creatable = self.creatable_gpu_ids()
+        for entry in types:
+            entry["creatable"] = not creatable or entry["id"] in creatable
         available = [t for t in types if t["price"]]
         return sorted(available, key=lambda t: t["price"])
 
@@ -223,9 +266,23 @@ class RunPod:
         if response.status_code == 404:
             raise RunPodError(f"RunPod has no {path} (404).")
         if not response.ok:
+            detail = _error_text(response)
+            if "no instances" in detail.lower():
+                # By far the most common way a create fails, and the message
+                # alone does not say what to do about it.
+                raise RunPodError(
+                    f"RunPod has no free instances matching this request: {detail}\n"
+                    "Availability moves hourly. Things that help, roughly in "
+                    "order:\n"
+                    "  * name several GPUs, not one -- [pod] gpu = [\"a\", \"b\"] in "
+                    "remote/anr.toml, or --gpu 'a,b'. RunPod takes whichever is "
+                    "free.\n"
+                    "  * allow the community cloud: --cloud ALL (cheaper, less "
+                    "reliable networking).\n"
+                    "  * `run.py gpus` to see what exists right now."
+                )
             raise RunPodError(
-                f"{method} {path} failed ({response.status_code}): "
-                f"{_error_text(response)}"
+                f"{method} {path} failed ({response.status_code}): {detail}"
             )
         if not response.content:
             return {}
@@ -275,12 +332,32 @@ def _json(response):
 
 
 def _error_text(response) -> str:
+    """Whatever RunPod said, as one line.
+
+    The shape varies: v1 returns ``{"error": ...}``, v2 follows RFC 9457 with
+    ``title``/``detail``, and a request that fails validation comes back as a
+    bare *list* of field errors. Assuming any one of those loses the message
+    exactly when it is most wanted -- the error formatter is a bad place to
+    raise from.
+    """
     try:
         payload = response.json()
     except ValueError:
-        return response.text[:400]
-    # v1 uses {"error": ...}; v2 follows RFC 9457 with title/detail.
-    for key in ("detail", "error", "message", "title"):
-        if payload.get(key):
-            return str(payload[key])
+        return response.text[:400] or f"HTTP {response.status_code}"
+
+    if isinstance(payload, list):
+        return "; ".join(_one_error(item) for item in payload)[:600]
+    if isinstance(payload, dict):
+        return _one_error(payload)
     return str(payload)[:400]
+
+
+def _one_error(item) -> str:
+    if not isinstance(item, dict):
+        return str(item)[:200]
+    for key in ("detail", "error", "message", "title", "msg"):
+        if item.get(key):
+            where = item.get("loc") or item.get("field") or item.get("path")
+            text = str(item[key])
+            return f"{where}: {text}" if where else text
+    return str(item)[:200]

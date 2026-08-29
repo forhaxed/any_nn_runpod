@@ -296,6 +296,21 @@ def _library_install() -> list:
 # ======================================================================
 #  pod commands
 # ======================================================================
+def _apply_overrides(recipe, args):
+    """Command-line overrides for the pod half of the recipe.
+
+    Several GPU ids are worth naming: RunPod picks whichever of them is free,
+    and "no instances currently available" is the single most common way a
+    create fails.
+    """
+    gpus = None
+    if getattr(args, "gpu", None):
+        gpus = [name.strip() for name in args.gpu.split(",") if name.strip()]
+    if getattr(args, "cloud", None):
+        recipe.cloud_type = args.cloud
+    return gpus
+
+
 def _client(project):
     from any_nn_runpod.cloud.api import RunPod
 
@@ -305,9 +320,11 @@ def _client(project):
 def command_gpus(project, args) -> int:
     """What is available and what it costs -- the menu for --gpu."""
     types = _client(project).gpu_types()
-    _heading(f"{len(types)} GPU types available")
+    usable = [gpu for gpu in types if gpu["creatable"]]
+    hidden = len(types) - len(usable)
+    _heading(f"{len(usable)} GPU types you can create a pod with")
     _say(f"  {'$/hr':>7}  {'GPU':<34} {'VRAM':>6}  clouds")
-    for gpu in types[: args.limit]:
+    for gpu in usable[: args.limit]:
         clouds = ", ".join(
             [name for name, on in (("secure", gpu["secure"]), ("community", gpu["community"])) if on]
         )
@@ -315,7 +332,16 @@ def command_gpus(project, args) -> int:
             f"  {gpu['price']:>7.3f}  {gpu['id']:<34} "
             f"{(gpu['memory_gb'] or 0):>4}GB  {clouds}"
         )
-    _say("\nPut one in remote/anr.toml under [pod] gpu = [\"...\"], or pass --gpu.")
+    if hidden:
+        _say(
+            f"\n({hidden} more exist in RunPod's catalogue but its create "
+            "endpoint will not accept them, so they are not listed.)"
+        )
+    _say(
+        "\nName several, not one: [pod] gpu = [\"a\", \"b\"] in remote/anr.toml, "
+        "or --gpu 'a,b'. RunPod takes whichever is free, and \"no instances "
+        "currently available\" is the usual answer to a single choice."
+    )
     return 0
 
 
@@ -389,7 +415,7 @@ def command_start(project, args) -> int:
 
     pod = lifecycle.find_or_create(
         client, project, recipe, token=token,
-        gpu_types=[args.gpu] if args.gpu else None, say=_say,
+        gpu_types=_apply_overrides(recipe, args), say=_say,
     )
     deadline = lifecycle.Deadline(project.max_hours)
 
@@ -542,13 +568,15 @@ def build_parser():
     gpus.set_defaults(handler=command_gpus)
 
     up = subparsers.add_parser("up", help="create (or resume) this project's pod")
-    up.add_argument("--gpu", help="GPU type id, overriding remote/anr.toml")
+    up.add_argument("--gpu", help="GPU type id(s), comma-separated, overriding the recipe")
+    up.add_argument("--cloud", choices=("SECURE", "COMMUNITY"))
     up.set_defaults(handler=command_up)
 
     start = subparsers.add_parser(
         "start", help="sync remote/, build the environment, and train on the pod"
     )
-    start.add_argument("--gpu", help="GPU type id, overriding remote/anr.toml")
+    start.add_argument("--gpu", help="GPU type id(s), comma-separated, overriding the recipe")
+    start.add_argument("--cloud", choices=("SECURE", "COMMUNITY"))
     start.add_argument(
         "--no-link",
         action="store_true",

@@ -18,6 +18,9 @@ import hashlib
 import os
 
 #: Never uploaded: caches, outputs, and the environment's own droppings.
+#: Deliberately short. ``remote/`` goes up whole -- that is the contract, and
+#: it is what lets weights sit beside the script that loads them. Anything
+#: cleverer here would eventually refuse to upload the very file the run needs.
 IGNORE_DIRS = {
     "__pycache__",
     ".git",

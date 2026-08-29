@@ -38,27 +38,10 @@ htmlcov/
 .anr/
 
 # ── What runs produce ───────────────────────────────────────────────
-# TensorBoard events, checkpoints and lock files. Every example and every
-# project writes an out/ next to itself.
+# TensorBoard events, checkpoints and lock files. Anything driven from a
+# checkout writes an out/ next to itself.
 out/
 output/
-examples/**/out/
-
-# ── What runs consume ───────────────────────────────────────────────
-# Downloaded datasets and anything heavy an example pulls or produces.
-# examples/cifar fetches ~170 MB per side on first run and re-fetches on
-# demand, so none of it is worth keeping.
-#
-# Scoped to examples/ deliberately: a blanket *.pt would also swallow a test
-# fixture someone adds later, and silently ignoring a file that was meant to
-# be committed is a nastier problem than a large one that was not.
-examples/**/data/
-examples/**/*.tar.gz
-examples/**/*.safetensors
-examples/**/*.ckpt
-examples/**/*.pt
-examples/**/*.pth
-examples/**/*.bin
 
 # ── OS ──────────────────────────────────────────────────────────────
 .DS_Store
