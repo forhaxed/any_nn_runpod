@@ -17,6 +17,12 @@ put the supervisor in the blast radius of every CUDA OOM.  Two sockets cost one
 extra exposed port and buy a supervisor that is still there to tell you what
 happened.
 
+Both ports are bound the moment the pod boots, and 7778 is bound by the
+supervisor rather than by the session that eventually uses it.  That is not
+tidiness: RunPod's edge only routes a mapped port that something was listening
+on when the pod started, and the session does not exist until a run does.  See
+``_Forwarder``.
+
     python -m any_nn_runpod.agent --port 7777 --token SECRET
 """
 
@@ -25,6 +31,7 @@ from __future__ import annotations
 import argparse
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import threading
@@ -37,6 +44,92 @@ from any_nn_runpod.wire.transport import TcpListener
 WORKSPACE = os.environ.get("ANR_WORKSPACE", "/workspace/remote")
 SESSION_PORT = int(os.environ.get("ANR_SESSION_PORT", 7778))
 
+#: The session listens here, on loopback, and the supervisor forwards the
+#: public port to it.  See ``_Forwarder``.
+INTERNAL_OFFSET = 1000
+
+
+class _Forwarder(threading.Thread):
+    """Holds the session's public port open from boot, and relays it.
+
+    RunPod publishes a pod's port mappings when the pod starts, and its edge
+    only routes a mapped port that something was listening on at the time.  The
+    supervisor binds its own port immediately, so that one works; the session's
+    port would only be bound once a run started, minutes later, and by then the
+    mapping is dead -- connecting to it times out forever while the session sits
+    there listening perfectly happily.
+
+    So the supervisor binds it at boot instead and forwards to wherever the
+    session actually is.  That keeps the two-connection design -- and the
+    crash isolation that is the point of it -- without depending on the edge
+    noticing a port that opened late.
+    """
+
+    def __init__(self, public_port: int, internal_port: int):
+        super().__init__(name="anr-forwarder", daemon=True)
+        self.public_port = public_port
+        self.internal_port = internal_port
+        self._listener = None
+
+    def run(self):
+        self._listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._listener.bind(("0.0.0.0", self.public_port))
+        self._listener.listen(8)
+        while True:
+            try:
+                client, _ = self._listener.accept()
+            except OSError:
+                return
+            threading.Thread(
+                target=self._relay, args=(client,), daemon=True
+            ).start()
+
+    def _relay(self, client):
+        upstream = self._reach_session()
+        if upstream is None:
+            # Nothing is running yet. Closing is right: the far side retries,
+            # and it must not be handed a socket that goes nowhere.
+            client.close()
+            return
+        for source, sink in ((client, upstream), (upstream, client)):
+            threading.Thread(
+                target=_pump, args=(source, sink), daemon=True
+            ).start()
+
+    def _reach_session(self, timeout=60.0):
+        """Wait briefly for the session: it may still be importing torch."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                return socket.create_connection(
+                    ("127.0.0.1", self.internal_port), timeout=5
+                )
+            except OSError:
+                time.sleep(0.5)
+        return None
+
+
+def _pump(source, sink):
+    try:
+        while True:
+            chunk = source.recv(1 << 16)
+            if not chunk:
+                break
+            sink.sendall(chunk)
+    except OSError:
+        pass
+    finally:
+        for end in (source, sink):
+            try:
+                end.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            try:
+                end.close()
+            except OSError:
+                pass
+
 
 class Supervisor:
     """Serves one launcher at a time; outlives every session it starts."""
@@ -44,6 +137,10 @@ class Supervisor:
     def __init__(self, workspace: str, session_port: int, token: str | None):
         self.workspace = os.path.abspath(workspace)
         self.session_port = session_port
+        #: Where the session really listens. The public port is held open from
+        #: boot by the forwarder and relayed here; see _Forwarder.
+        self.internal_port = session_port + INTERNAL_OFFSET if session_port else 0
+        self.forwarder = None
         self.token = token
         self.link = None
         self.child = None
@@ -56,6 +153,9 @@ class Supervisor:
     #  Serving
     # ================================================================
     def serve_forever(self, host: str, port: int):
+        if self.session_port:
+            self.forwarder = _Forwarder(self.session_port, self.internal_port)
+            self.forwarder.start()
         listener = TcpListener(host, port)
         _announce(port, self.session_port, listener.port)
         while True:
@@ -106,6 +206,7 @@ class Supervisor:
         return {
             "workspace": self.workspace,
             "session_port": self.session_port,
+            "internal_port": self.internal_port,
             "disk_free_gb": round(free / (1 << 30), 1),
             "disk_total_gb": round(total / (1 << 30), 1),
             "running": self._running(),
@@ -208,10 +309,12 @@ class Supervisor:
             ["--no-link"]
             if payload.get("no_link")
             else [
+                # Loopback only: the public port belongs to the forwarder, which
+                # has been holding it open since the pod booted.
                 "--host",
-                "0.0.0.0",
+                "127.0.0.1",
                 "--port",
-                str(self.session_port),
+                str(self.internal_port),
                 "--wait",
                 str(payload.get("wait", 300)),
             ]

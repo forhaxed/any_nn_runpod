@@ -281,6 +281,87 @@ class Pod:
             self.listener.close()
 
 
+def test_the_session_port_is_bound_before_any_session_exists(tmp_path):
+    """The public port must be listening from boot, not from the first run.
+
+    RunPod's edge only routes a mapped port that something was listening on
+    when the pod started. A session port bound minutes later is mapped and
+    dead: connecting to it times out forever while the session sits there
+    listening perfectly happily. So the supervisor holds it and relays.
+    """
+    import socket as socket_module
+
+    from any_nn_runpod.agent import _Forwarder
+
+    free = socket_module.socket()
+    free.bind(("127.0.0.1", 0))
+    public = free.getsockname()[1]
+    free.close()
+
+    forwarder = _Forwarder(public, internal_port=public + 1000)
+    forwarder.start()
+
+    # Nothing is running behind it, and it still accepts -- which is the point.
+    assert settle(lambda: _accepts("127.0.0.1", public)), "the port never opened"
+
+
+def _accepts(host, port):
+    import socket as socket_module
+
+    try:
+        with socket_module.create_connection((host, port), timeout=1):
+            return True
+    except OSError:
+        return False
+
+
+def test_the_forwarder_relays_to_whatever_is_listening_inside(tmp_path):
+    import socket as socket_module
+
+    from any_nn_runpod.agent import _Forwarder
+
+    probe = socket_module.socket()
+    probe.bind(("127.0.0.1", 0))
+    public = probe.getsockname()[1]
+    probe.close()
+    internal = public + 1000
+
+    inside = socket_module.socket()
+    inside.setsockopt(socket_module.SOL_SOCKET, socket_module.SO_REUSEADDR, 1)
+    inside.bind(("127.0.0.1", internal))
+    inside.listen(1)
+
+    def echo():
+        # A loop, not a single accept: the readiness probe below opens a
+        # connection of its own, and so does every retry. A one-shot server
+        # would be consumed before the real client arrived.
+        while True:
+            try:
+                connection, _ = inside.accept()
+            except OSError:
+                return
+            connection.sendall(b"hello from inside")
+            connection.close()
+
+    threading.Thread(target=echo, daemon=True).start()
+    _Forwarder(public, internal).start()
+
+    assert settle(lambda: _accepts("127.0.0.1", public))
+    with socket_module.create_connection(("127.0.0.1", public), timeout=10) as client:
+        client.settimeout(10)
+        assert client.recv(64) == b"hello from inside"
+    inside.close()
+
+
+def settle(predicate, timeout=10.0, interval=0.05):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(interval)
+    return False
+
+
 @pytest.fixture
 def pod(tmp_path):
     running = Pod(str(tmp_path / "workspace"))
