@@ -141,8 +141,12 @@ def serve(entry: str, host: str, port: int, output_dir: str, wait: float | None)
             )
     finally:
         if link.connected:
-            # Give the last notify time to reach the socket before the FIN.
-            link.ping(timeout=10)
+            # Not a ping: a ping is answered on arrival, while the "finished"
+            # status is still queued behind however many log messages this run
+            # produced. Hanging up then loses it, and the local side reports a
+            # run that succeeded as one that died. This waits for the far side
+            # to have actually handled everything.
+            link.flush(timeout=120)
             link.close("session over")
         if listener is not None:
             listener.close()

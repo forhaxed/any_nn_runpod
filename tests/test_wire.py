@@ -155,6 +155,37 @@ def test_notifications_are_handled_in_the_order_they_were_sent(pair):
     assert seen == list(range(30))
 
 
+def test_flush_waits_for_queued_notifications_to_be_handled(pair):
+    """The barrier that makes it safe to hang up.
+
+    A run that finishes, says so, and closes immediately would otherwise lose
+    its own "finished": notifications are handled in order on one thread, so
+    the socket can go while the last one is still queued behind a thousand log
+    messages -- and a successful run gets reported as one that died.
+    """
+    handled = []
+
+    @pair.local.on("log")
+    def _(payload):
+        time.sleep(0.003)
+        handled.append(payload["i"])
+
+    for i in range(200):
+        pair.remote.notify("log", {"i": i})
+
+    # A ping is answered on arrival, so it proves nothing about the backlog.
+    assert pair.remote.ping(timeout=10)
+    assert len(handled) < 200, "the backlog was already drained; test is not testing"
+
+    assert pair.remote.flush(timeout=30)
+    assert handled == list(range(200))
+
+
+def test_flush_on_a_dead_link_reports_failure_rather_than_hanging(pair):
+    pair.remote.close("gone")
+    assert pair.remote.flush(timeout=5) is False
+
+
 def test_a_notification_handler_that_raises_does_not_stop_the_rest(pair):
     seen = []
     done = threading.Event()

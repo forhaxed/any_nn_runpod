@@ -428,6 +428,26 @@ class Link:
         except (LinkError, TimeoutError, RemoteError):
             return False
 
+    def flush(self, timeout: float = 60.0) -> bool:
+        """Wait until the other side has *handled* everything sent so far.
+
+        A ping does not do this. Pings are answered the moment they arrive,
+        while notifications queue up to be handled in order -- so a ping can
+        come back with a thousand log messages still waiting their turn.
+
+        This goes through that queue instead of past it, so when it returns,
+        every notification sent before it has been dealt with. Which is what
+        makes it safe to hang up: a run that finishes, says so, and closes
+        immediately would otherwise have its "finished" still sitting in the
+        queue when the far side notices the socket is gone -- and a successful
+        run gets reported as a run that died.
+        """
+        try:
+            self.call("__flush__", timeout=timeout)
+            return True
+        except (LinkError, TimeoutError, RemoteError):
+            return False
+
     # -- plumbing ----------------------------------------------------
     def _send(self, mtype, meta, body=None):
         try:
@@ -526,7 +546,12 @@ class Link:
             return
 
         if kind == protocol.CALL:
-            self._pool.submit(self._run_call, message)
+            if message.meta["name"] == "__flush__":
+                # Deliberately queued rather than dispatched: answering it is
+                # the proof that everything queued ahead of it has been handled.
+                self._notices.put(message)
+            else:
+                self._pool.submit(self._run_call, message)
             return
 
     def _notice_loop(self):
@@ -535,6 +560,9 @@ class Link:
             message = self._notices.get()
             if message is None:  # the sentinel from _teardown
                 return
+            if message.type == protocol.CALL:  # a flush barrier; see flush()
+                self._send(protocol.RESULT, {"cid": message.meta["cid"]})
+                continue
             name = message.meta["name"]
             handler = self._handlers.get(name)
             if handler is None:

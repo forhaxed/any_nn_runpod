@@ -125,15 +125,7 @@ def _drive_local(project: Project, host: str, port: int, child):
     _heading("Training")
     app.attach(link)
     app.wait()
-
-    if app.failure:
-        _say(f"{Fore.RED}Run failed.{Style.RESET_ALL}")
-    elif app.result:
-        _say(
-            f"\n{Fore.GREEN}Finished at step {app.result.get('global_step')}."
-            f"{Style.RESET_ALL}"
-        )
-        _say(f"tensorboard --logdir {app.result.get('log_dir')}")
+    _report_run(app)
     return app
 
 
@@ -518,7 +510,10 @@ def _confirm(question: str) -> bool:
 
 def _report_run(app):
     if app.failure:
-        _say(f"{Fore.RED}Run failed.{Style.RESET_ALL}")
+        # The reason, not just the verdict. A run that reports "failed" and
+        # then declines to say why is the most annoying possible output, and it
+        # is exactly what this printed before.
+        _say(f"{Fore.RED}Run failed: {app.failure}{Style.RESET_ALL}")
     elif app.result:
         _say(
             f"\n{Fore.GREEN}Finished at step {app.result.get('global_step')}."

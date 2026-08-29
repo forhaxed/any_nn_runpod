@@ -140,13 +140,23 @@ class Local:
         )
         return self
 
-    def wait(self, timeout=None) -> dict:
-        """Block until the run reports finished or the link dies."""
+    def wait(self, timeout=None, grace: float = 30.0) -> dict:
+        """Block until the run reports finished or the link dies.
+
+        ``grace`` is what happens after the link drops: notifications are
+        handled in order on their own thread, so the socket can close while the
+        run's last words -- including "finished" -- are still queued. Giving up
+        the instant the link goes is how a successful run gets reported as a
+        dead one. The queue drains on its own; this just waits for it.
+        """
         while not self._finished.wait(0.5):
             if self.link is None or not self.link.connected:
+                if self._finished.wait(grace):
+                    break
                 if self.failure is None and not self.result:
                     self.failure = (
-                        f"the training side went away ({self.link.close_reason})"
+                        f"the training side went away ({self.link.close_reason}) "
+                        f"without ever saying how the run ended"
                         if self.link is not None
                         else "no link"
                     )
