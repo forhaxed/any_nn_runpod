@@ -8,12 +8,14 @@ create" rule is checked against pod records rather than against an account.
 
 from __future__ import annotations
 
+import argparse
 import os
 import threading
 import time
 
 import pytest
 
+from any_nn_runpod import cli
 from any_nn_runpod.agent import Supervisor
 from any_nn_runpod.cloud import driver, lifecycle, sync
 from any_nn_runpod.cloud.api import RunPodError
@@ -568,3 +570,220 @@ def test_starting_a_missing_entry_says_so_instead_of_failing_obscurely(pod):
 
     with pytest.raises(RemoteError, match="has remote/ been synced"):
         pod.link.call("run.start", {"entry": "nope.py"}, timeout=30)
+
+
+# ======================================================================
+#  Where the pod ends up
+# ======================================================================
+def test_the_region_preference_reaches_runpod():
+    """Listing regions is only half of it -- the order has to be honoured.
+
+    ``dataCenterIds`` alone means "any of these", and RunPod's default is to
+    put the pod wherever it has room.  With several listed that can be the
+    wrong continent, which for a run streaming its data from home is the
+    difference between a full link and a starved one.
+    """
+    from any_nn_runpod.manifest import Project, Recipe
+
+    captured = {}
+
+    class Recorder(FakeClient):
+        def create_pod(self, **kwargs):
+            captured.update(kwargs)
+            return {"id": "new", "env": kwargs["env"]}
+
+        def wait_until_ready(self, pod_id, ports, **kwargs):
+            return {"id": pod_id, "publicIp": "1.2.3.4", "portMappings": {"7777": 1}}
+
+    lifecycle.create(
+        Recorder([]),
+        Project(pod_name="anr-test"),
+        Recipe(
+            gpu=["NVIDIA GeForce RTX 4090"],
+            data_centers=["EU-SE-1", "EU-RO-1"],
+            data_center_priority="custom",
+        ),
+        say=lambda _t: None,
+    )
+    assert captured["data_centers"] == ["EU-SE-1", "EU-RO-1"]
+    assert captured["data_center_priority"] == "custom"
+
+
+def test_the_region_shows_up_in_what_the_launcher_says():
+    """You should be able to see where a pod is being made before it exists."""
+    from any_nn_runpod.manifest import Project, Recipe
+
+    class Recorder(FakeClient):
+        def create_pod(self, **kwargs):
+            return {"id": "new", "env": kwargs["env"]}
+
+        def wait_until_ready(self, pod_id, ports, **kwargs):
+            return {"id": pod_id, "publicIp": "1.2.3.4", "portMappings": {"7777": 1}}
+
+    said = []
+    lifecycle.create(
+        Recorder([]),
+        Project(pod_name="anr-test"),
+        Recipe(gpu=["NVIDIA GeForce RTX 4090"], data_centers=["EU-SE-1"]),
+        say=said.append,
+    )
+    assert "EU-SE-1" in "\n".join(said)
+
+
+def test_a_misspelt_region_is_refused_by_name():
+    """A bad GPU id fails the create outright; a bad region need not.
+
+    RunPod's schema error names no field, so the useful version of this
+    complaint is one that says which value was wrong and what the real ones
+    are -- before a pod exists anywhere.
+    """
+    from any_nn_runpod.cloud.api import RunPod
+
+    client = object.__new__(RunPod)
+    client._enums = {"dataCenterIds": {"EU-SE-1", "EU-RO-1", "US-GA-1"}}
+
+    with pytest.raises(RunPodError, match="EU-SW-1"):
+        client._check_data_centers(["EU-SE-1", "EU-SW-1"])
+
+    # And it says what the real ones are, since that is the next question.
+    try:
+        client._check_data_centers(["nonsense"])
+    except RunPodError as refusal:
+        assert "EU-SE-1" in str(refusal)
+
+    # No regions asked for is not an error -- it means "anywhere".
+    client._check_data_centers([])
+    client._check_data_centers(None)
+
+
+def test_an_unreadable_spec_does_not_block_a_create():
+    """Validation is a courtesy.  RunPod having a bad morning is not a reason
+    to refuse to rent a pod."""
+    from any_nn_runpod.cloud.api import RunPod
+
+    client = object.__new__(RunPod)
+    client._enums = {"dataCenterIds": set()}
+    client._check_data_centers(["anything-at-all"])
+
+
+# ======================================================================
+#  Choosing what to rent
+# ======================================================================
+class FakeCatalogue:
+    """Enough of a RunPod client to drive the picker without an account."""
+
+    KNOWN = {"EU-RO-1", "EU-SE-1", "EUR-IS-1", "US-GA-1", "AP-JP-1"}
+    OFFERS = [
+        {"id": "NVIDIA A40", "name": "A40", "memory_gb": 48, "price": 0.35,
+         "stock": "High", "data_center": "EU-SE-1"},
+        {"id": "NVIDIA RTX A6000", "name": "A6000", "memory_gb": 48, "price": 0.33,
+         "stock": "Low", "data_center": "EU-SE-1"},
+        {"id": "NVIDIA GeForce RTX 5090", "name": "5090", "memory_gb": 32,
+         "price": 0.69, "stock": "Low", "data_center": "EUR-IS-1"},
+    ]
+
+    def data_center_ids(self):
+        return self.KNOWN
+
+    def gpu_availability(self, regions):
+        rows = [row for row in self.OFFERS if row["data_center"] in regions]
+        return sorted(rows, key=lambda row: (row["price"], row["id"]))
+
+
+def test_a_region_group_expands_to_the_data_centres_in_it():
+    client = FakeCatalogue()
+    assert cli._resolve_regions(client, "eu") == ["EU-RO-1", "EU-SE-1", "EUR-IS-1"]
+    assert cli._resolve_regions(client, "us") == ["US-GA-1"]
+    # Ids straight through, and case does not matter.
+    assert cli._resolve_regions(client, "eu-se-1, EU-RO-1") == ["EU-SE-1", "EU-RO-1"]
+    # "Anywhere" is the absence of a restriction, not a region.
+    for anywhere in ("", "any", "all", "anywhere"):
+        assert cli._resolve_regions(client, anywhere) == []
+
+
+def test_a_misspelt_region_says_so_before_anything_is_rented():
+    client = FakeCatalogue()
+    with pytest.raises(ValueError, match="EU-SW-1"):
+        cli._resolve_regions(client, "EU-SW-1")
+
+
+def test_the_picker_turns_choices_into_a_recipe(monkeypatch):
+    """Picking two offers means both GPUs, both regions, in that order."""
+    from any_nn_runpod.manifest import Recipe
+
+    answers = iter(["1", "1,3"])   # 1 = Europe, then the first and third offer
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
+    monkeypatch.setattr(cli, "_say", lambda *_a, **_k: None)
+
+    recipe = Recipe()
+    gpus = cli._choose_pod(FakeCatalogue(), recipe)
+
+    # Offers come back sorted by price, so 1 is the A6000 and 3 the 5090.
+    assert gpus == ["NVIDIA RTX A6000", "NVIDIA GeForce RTX 5090"]
+    assert recipe.data_centers == ["EU-SE-1", "EUR-IS-1"]
+    assert recipe.data_center_priority == "custom"
+
+
+def test_picking_nothing_leaves_the_recipe_alone(monkeypatch):
+    """Enter twice must not be a way to accidentally change what you rent."""
+    from any_nn_runpod.manifest import Recipe
+
+    answers = iter(["1", ""])
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
+    monkeypatch.setattr(cli, "_say", lambda *_a, **_k: None)
+
+    recipe = Recipe(gpu=["NVIDIA A40"])
+    assert cli._choose_pod(FakeCatalogue(), recipe) is None
+    assert recipe.gpu == ["NVIDIA A40"], "the recipe's own GPU list was overwritten"
+
+
+def test_region_on_the_command_line_pins_the_order(monkeypatch):
+    from any_nn_runpod.manifest import Recipe
+
+    recipe = Recipe()
+    args = argparse.Namespace(gpu=None, cloud=None, region="EU-SE-1,EU-RO-1")
+    assert cli._apply_overrides(recipe, args, FakeCatalogue()) is None
+    assert recipe.data_centers == ["EU-SE-1", "EU-RO-1"]
+    assert recipe.data_center_priority == "custom"
+
+
+def test_the_suggested_config_is_toml_a_human_can_paste(monkeypatch):
+    """The picker prints lines to copy into anr.toml.  They have to parse.
+
+    Python's repr quotes with apostrophes and TOML does not accept those, so
+    the obvious implementation produces a block that looks right and is not.
+    """
+    import tomllib
+
+    from any_nn_runpod.manifest import Recipe
+
+    answers = iter(["1", "1,3"])
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
+    said = []
+    monkeypatch.setattr(cli, "_say", said.append)
+
+    cli._choose_pod(FakeCatalogue(), Recipe())
+
+    start = next(i for i, line in enumerate(said) if line.strip() == "[pod]")
+    block = "\n".join(line.strip() for line in said[start:])
+    parsed = tomllib.loads(block)["pod"]
+    assert parsed["gpu"] == ["NVIDIA RTX A6000", "NVIDIA GeForce RTX 5090"]
+    assert parsed["data_centers"] == ["EU-SE-1", "EUR-IS-1"]
+    assert parsed["data_center_priority"] == "custom"
+
+
+def test_a_very_long_gpu_name_does_not_shove_the_columns_out_of_line():
+    row = {
+        "id": "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+        "memory_gb": 96, "price": 1.69, "stock": "Low", "data_center": "EU-CZ-1",
+    }
+    short = {
+        "id": "NVIDIA A40",
+        "memory_gb": 48, "price": 0.35, "stock": "High", "data_center": "EU-SE-1",
+    }
+    long_line, short_line = cli._offer_line(row), cli._offer_line(short)
+    # The region column starts in the same place for both -- that is what
+    # "aligned" means here.  Stock is last and unpadded, so total length is
+    # allowed to differ.
+    assert long_line.index("EU-CZ-1") == short_line.index("EU-SE-1")
+    assert cli._offer_header().index("region") == long_line.index("EU-CZ-1")

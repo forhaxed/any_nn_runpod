@@ -97,7 +97,9 @@ def create(
     say(
         f"Creating pod {project.pod_name!r} ({recipe.image}) on "
         + (gpus[0] if len(gpus) == 1 else f"{len(gpus)} candidate GPUs: {gpus[0]}, ...")
-        + f" [{recipe.cloud_type}]..."
+        + f" [{recipe.cloud_type}"
+        + (f", {', '.join(recipe.data_centers)}" if recipe.data_centers else "")
+        + "]..."
     )
     pod = client.create_pod(
         name=project.pod_name,
@@ -114,6 +116,7 @@ def create(
         network_volume_id=recipe.network_volume_id,
         cloud_type=recipe.cloud_type,
         data_centers=recipe.data_centers,
+        data_center_priority=recipe.data_center_priority,
         gpu_priority=recipe.gpu_priority,
     )
     say(

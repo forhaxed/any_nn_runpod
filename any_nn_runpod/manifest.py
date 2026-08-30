@@ -55,6 +55,11 @@ class Recipe:
     network_volume_id: str | None = None
     cloud_type: str = "SECURE"
     data_centers: list = field(default_factory=list)
+    #: "availability" -- RunPod puts the pod wherever it has room, which with
+    #: several regions listed may not be the one you care about. "custom" --
+    #: the order of `data_centers` is a preference, nearest first if that is
+    #: how you wrote it.  Same pair of meanings as `gpu_priority`.
+    data_center_priority: str = "availability"
     env: dict = field(default_factory=dict)
 
     @property
@@ -97,6 +102,9 @@ class Recipe:
             network_volume_id=pod.get("network_volume_id"),
             cloud_type=pod.get("cloud_type", cls.cloud_type),
             data_centers=list(pod.get("data_centers", [])),
+            data_center_priority=pod.get(
+                "data_center_priority", cls.data_center_priority
+            ),
             env=dict(pod.get("env", {})),
         )
         entry_path = os.path.join(remote_dir, recipe.entry)

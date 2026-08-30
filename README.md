@@ -94,9 +94,9 @@ for free.
 
 ```
 run.py local  [--no-link] [--rebuild] [--port N]   train here, no pod
-run.py gpus   [--limit N]                          what exists, and what it costs
-run.py up     [--gpu A,B] [--cloud SECURE|COMMUNITY]        create the pod only
-run.py start  [--gpu A,B] [--cloud ...] [--no-link]
+run.py gpus   [--limit N] [--region eu]            what exists, and what it costs
+run.py up     [--gpu A,B] [--region eu] [--cloud SECURE|COMMUNITY] [--yes]
+run.py start  [--gpu A,B] [--region eu] [--cloud ...] [--no-link]
               [--rebuild] [--on-finish terminate|stop|keep] [--yes]
 run.py ps                                          pods this tool created
 run.py down   [--all] [--action terminate|stop] [--yes]
@@ -105,6 +105,27 @@ run.py down   [--all] [--action terminate|stop] [--yes]
 `--gpu` takes several, comma-separated: RunPod takes whichever is free, and
 "no instances currently available" is the usual answer to a single choice.
 `--rebuild` throws the cached environment away and builds it again.
+
+### Choosing what to rent
+
+`run.py up` on a terminal asks, rather than assuming. It offers a region, then
+everything actually rentable there -- price, VRAM, data centre, stock -- and
+prints the `anr.toml` lines for whatever you pick, so a choice you liked can
+become the default. `--gpu`, `--region` or `--yes` skip the menu, which is how
+it stays scriptable; `run.py start` never asks.
+
+```
+run.py gpus --region eu          stock and prices across Europe
+run.py up --region EU-SE-1       pin one data centre, no questions
+```
+
+`--region` takes a group -- `eu`, `us`, `ca`, `ap`, `oc` -- or data centre ids
+comma-separated, or `any`. Naming one means it, so the order is honoured
+rather than being a hint (see `data_center_priority` below).
+
+Region matters more here than it usually does: the local side is streaming the
+run's data from your machine for its whole duration, so a pod on the wrong
+continent is a slower link for hours, not a slower handshake once.
 
 ---
 
@@ -309,12 +330,22 @@ gpu = ["NVIDIA GeForce RTX 4090", "NVIDIA RTX A5000"]
 # preference, so put the cheapest acceptable card at the top.
 gpu_priority = "availability"
 container_disk_gb = 60
+
+# Where the pod may be created. Empty means anywhere.
+data_centers = ["EU-SE-1", "EU-RO-1"]
+# The same pair of meanings as gpu_priority, for the same reason: with
+# "availability" RunPod puts the pod wherever it has room, which with several
+# regions listed may not be the one you care about.
+data_center_priority = "custom"
 ```
 
 Every `[pod]` field: `image`, `gpu`, `gpu_priority`, `gpu_count`,
 `container_disk_gb`, `volume_gb`, `network_volume_id`, `cloud_type`
-(`SECURE`/`COMMUNITY`), `data_centers`, `env`. `[env]` also takes
-`torchvision` and `torchaudio`.
+(`SECURE`/`COMMUNITY`), `data_centers`, `data_center_priority`, `env`.
+`[env]` also takes `torchvision` and `torchaudio`.
+
+`run.py gpus --region eu` lists valid data centre ids alongside what each one
+has; a misspelt one is refused by name before a pod exists.
 
 `anr.toml` in the project root -- paths and pod policy. Never uploaded.
 

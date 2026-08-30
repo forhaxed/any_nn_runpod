@@ -291,7 +291,46 @@ def _library_install() -> list:
 # ======================================================================
 #  pod commands
 # ======================================================================
-def _apply_overrides(recipe, args):
+#: The prefixes people actually think in.  Matched against RunPod's own list
+#: of data centres, so a region it opens tomorrow appears here on its own.
+REGION_GROUPS = {
+    "eu": ("Europe", ("EU-", "EUR-")),
+    "us": ("United States", ("US-",)),
+    "ca": ("Canada", ("CA-",)),
+    "ap": ("Asia-Pacific", ("AP-",)),
+    "oc": ("Oceania", ("OC-",)),
+}
+
+
+def _regions_in(client, group: str) -> list:
+    _name, prefixes = REGION_GROUPS[group]
+    return sorted(
+        dc for dc in client.data_center_ids() if dc.startswith(prefixes)
+    )
+
+
+def _resolve_regions(client, text: str) -> list:
+    """``eu`` / ``EU-SE-1,EU-RO-1`` / ``any`` -> a list of data centre ids."""
+    text = (text or "").strip()
+    if not text or text.lower() in ("any", "all", "anywhere"):
+        return []
+    key = text.lower()
+    if key in REGION_GROUPS:
+        return _regions_in(client, key)
+    wanted = [name.strip().upper() for name in text.split(",") if name.strip()]
+    known = client.data_center_ids()
+    unknown = [name for name in wanted if known and name not in known]
+    if unknown:
+        raise ValueError(
+            "No such RunPod data centre: "
+            + ", ".join(repr(name) for name in unknown)
+            + f".\nUse one of {', '.join(sorted(REGION_GROUPS))}, or ids from: "
+            + ", ".join(sorted(known))
+        )
+    return wanted
+
+
+def _apply_overrides(recipe, args, client=None):
     """Command-line overrides for the pod half of the recipe.
 
     Several GPU ids are worth naming: RunPod picks whichever of them is free,
@@ -303,6 +342,11 @@ def _apply_overrides(recipe, args):
         gpus = [name.strip() for name in args.gpu.split(",") if name.strip()]
     if getattr(args, "cloud", None):
         recipe.cloud_type = args.cloud
+    if getattr(args, "region", None) and client is not None:
+        recipe.data_centers = _resolve_regions(client, args.region)
+        # Asked for explicitly means meant: honour the order rather than
+        # letting RunPod put the pod wherever it happens to have room.
+        recipe.data_center_priority = "custom"
     return gpus
 
 
@@ -312,9 +356,62 @@ def _client(project):
     return RunPod(root=project.root)
 
 
+#: Long enough for every GPU name RunPod currently has bar the Blackwell
+#: workstation editions, which are truncated rather than allowed to shove the
+#: region column out of line.
+_NAME_WIDTH = 34
+
+
+def _offer_line(row, number=None) -> str:
+    name = row["id"]
+    if len(name) > _NAME_WIDTH:
+        name = name[: _NAME_WIDTH - 1] + "…"
+    lead = f"  {number:>3}" if number is not None else "  "
+    return (
+        f"{lead}  {row['price']:>7.3f}  {name:<{_NAME_WIDTH}} "
+        f"{(row['memory_gb'] or 0):>4}GB  {row['data_center']:<9} {row['stock']}"
+    )
+
+
+def _offer_header(numbered=False) -> str:
+    lead = f"  {'#':>3}" if numbered else "  "
+    return f"{lead}  {'$/hr':>7}  {'GPU':<{_NAME_WIDTH}} {'VRAM':>6}  {'region':<9} stock"
+
+
+def _toml_list(values) -> str:
+    """TOML wants double quotes.  Python's repr gives single ones, and a line
+    pasted out of here has to actually parse."""
+    return "[" + ", ".join(f'"{value}"' for value in values) + "]"
+
+
+def _show_offers(rows, limit=None):
+    """One line per (GPU, region) pair that can actually be rented today."""
+    _say(_offer_header())
+    for row in rows[:limit]:
+        _say(_offer_line(row))
+
+
 def command_gpus(project, args) -> int:
     """What is available and what it costs -- the menu for --gpu."""
-    types = _client(project).gpu_types()
+    client = _client(project)
+
+    if getattr(args, "region", None):
+        regions = _resolve_regions(client, args.region)
+        rows = client.gpu_availability(regions)
+        _heading(
+            f"{len(rows)} GPU/region offer(s) in {', '.join(regions)}"
+            if rows
+            else f"Nothing available in {', '.join(regions)} right now"
+        )
+        _show_offers(rows, args.limit)
+        _say(
+            "\nStock is RunPod's own word for it -- High/Medium/Low. Pin a "
+            "region with [pod] data_centers = [...] in remote/anr.toml, or "
+            "--region on up/start."
+        )
+        return 0
+
+    types = client.gpu_types()
     usable = [gpu for gpu in types if gpu["creatable"]]
     hidden = len(types) - len(usable)
     _heading(f"{len(usable)} GPU types you can create a pod with")
@@ -401,16 +498,116 @@ def command_down(project, args) -> int:
     return 0
 
 
+def _ask(question: str, default: str = "") -> str:
+    suffix = f" [{default}]" if default else ""
+    answer = input(f"{question}{suffix}: ").strip()
+    return answer or default
+
+
+def _choose_region(client, recipe) -> list:
+    """Which part of the world, out of the ones RunPod has."""
+    _heading("Region")
+    # Declaration order, not alphabetical: the list reads as a menu, and a
+    # menu whose numbering shuffles when a region is added is a menu that
+    # cannot be described in a note to yourself.
+    keys = list(REGION_GROUPS)
+    for number, key in enumerate(keys, 1):
+        name, _prefixes = REGION_GROUPS[key]
+        ids = _regions_in(client, key)
+        _say(f"  [{number}] {name:<15} {len(ids):>2} data centre(s)  "
+             f"{', '.join(ids[:4])}{' ...' if len(ids) > 4 else ''}")
+    _say(f"  [{len(keys) + 1}] anywhere        let RunPod choose")
+
+    current = ",".join(recipe.data_centers) if recipe.data_centers else "anywhere"
+    answer = _ask("  choice, or data centre ids", current)
+    if answer.isdigit() and 1 <= int(answer) <= len(keys):
+        return _regions_in(client, keys[int(answer) - 1])
+    if answer.isdigit():
+        return []
+    return _resolve_regions(client, answer)
+
+
+def _choose_pod(client, recipe):
+    """Pick a region and a GPU from what can actually be rented right now.
+
+    The recipe's own list is the default, so pressing enter twice changes
+    nothing -- this is a way to look before spending, not a step to get past.
+    """
+    regions = _choose_region(client, recipe)
+    if not regions:
+        _say("\n  Anywhere it is. `run.py gpus` lists the global catalogue.")
+        recipe.data_centers = []
+        return None
+
+    rows = client.gpu_availability(regions)
+    if not rows:
+        _say(f"\n{Fore.YELLOW}Nothing is available in "
+             f"{', '.join(regions)} right now.{Style.RESET_ALL}")
+        recipe.data_centers = []
+        return None
+
+    _heading(f"{len(rows)} offer(s) in {', '.join(regions)}")
+    _say(_offer_header(numbered=True))
+    for number, row in enumerate(rows, 1):
+        _say(_offer_line(row, number))
+    _say(
+        "\n  Name several, in order of preference: RunPod takes the first one "
+        "it can\n  actually provide, and 'no instances currently available' is "
+        "the usual\n  answer to a single choice."
+    )
+
+    answer = _ask("  numbers, comma separated", "")
+    chosen = []
+    for token in answer.split(","):
+        token = token.strip()
+        if token.isdigit() and 1 <= int(token) <= len(rows):
+            chosen.append(rows[int(token) - 1])
+    if not chosen:
+        _say("  Nothing picked; using the recipe as written.")
+        recipe.data_centers = regions
+        recipe.data_center_priority = "custom"
+        return None
+
+    gpus, centres = [], []
+    for row in chosen:
+        if row["id"] not in gpus:
+            gpus.append(row["id"])
+        if row["data_center"] not in centres:
+            centres.append(row["data_center"])
+    recipe.data_centers = centres
+    recipe.data_center_priority = "custom"
+
+    _say("\n  To make this the default, put it in remote/anr.toml:\n")
+    _say("    [pod]")
+    _say(f"    gpu = {_toml_list(gpus)}")
+    _say('    gpu_priority = "custom"')
+    _say(f"    data_centers = {_toml_list(centres)}")
+    _say('    data_center_priority = "custom"')
+    return gpus
+
+
 def command_up(project, args) -> int:
     from any_nn_runpod.cloud import lifecycle
 
     recipe = Recipe.load(project.remote_path)
+    client = _client(project)
+    gpus = _apply_overrides(recipe, args, client)
+
+    # The menu is the default here, and only here: `up` is the command you run
+    # when you are deciding what to rent. `start` is the one you run to get on
+    # with it, and it must stay scriptable.
+    if gpus is None and not args.yes and sys.stdin.isatty():
+        try:
+            gpus = _choose_pod(client, recipe)
+        except EOFError:
+            _say("  (no input; using the recipe as written)")
+
     pod = lifecycle.find_or_create(
-        _client(project),
+        client,
         project,
         recipe,
         token=os.environ.get("ANR_TOKEN"),
-        gpu_types=[args.gpu] if args.gpu else None,
+        gpu_types=gpus,
         say=_say,
     )
     _say(f"\nPod {pod['id']} is up. `run.py start` will sync and train on it.")
@@ -427,7 +624,7 @@ def command_start(project, args) -> int:
 
     pod = lifecycle.find_or_create(
         client, project, recipe, token=token,
-        gpu_types=_apply_overrides(recipe, args), say=_say,
+        gpu_types=_apply_overrides(recipe, args, client), say=_say,
     )
     deadline = lifecycle.Deadline(project.max_hours)
 
@@ -633,17 +830,35 @@ def build_parser():
 
     gpus = subparsers.add_parser("gpus", help="list available GPU types and prices")
     gpus.add_argument("--limit", type=int, default=25)
+    gpus.add_argument(
+        "--region",
+        help="show stock for these regions instead of the global catalogue: "
+        "a group (eu, us, ca, ap, oc) or data centre ids, comma-separated",
+    )
     gpus.set_defaults(handler=command_gpus)
 
     up = subparsers.add_parser("up", help="create (or resume) this project's pod")
     up.add_argument("--gpu", help="GPU type id(s), comma-separated, overriding the recipe")
+    up.add_argument(
+        "--region",
+        help="where the pod may be created: a group (eu, us, ca, ap, oc), "
+        "data centre ids comma-separated, or 'any'",
+    )
     up.add_argument("--cloud", choices=("SECURE", "COMMUNITY"))
+    up.add_argument(
+        "--yes", action="store_true", help="skip the menu and use the recipe as written"
+    )
     up.set_defaults(handler=command_up)
 
     start = subparsers.add_parser(
         "start", help="sync remote/, build the environment, and train on the pod"
     )
     start.add_argument("--gpu", help="GPU type id(s), comma-separated, overriding the recipe")
+    start.add_argument(
+        "--region",
+        help="where a new pod may be created: a group (eu, us, ca, ap, oc), "
+        "data centre ids comma-separated, or 'any'",
+    )
     start.add_argument("--cloud", choices=("SECURE", "COMMUNITY"))
     start.add_argument(
         "--no-link",
