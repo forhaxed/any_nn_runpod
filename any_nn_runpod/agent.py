@@ -39,7 +39,7 @@ import time
 import traceback
 
 from any_nn_runpod.link import Link
-from any_nn_runpod.wire.transport import TcpListener
+from any_nn_runpod.wire.transport import TcpListener, _keepalive
 
 #: Where the uploaded ``remote/`` lands: the volume, because it is the only
 #: disk on a pod that survives a restart.  RunPod's container disk is "lost on
@@ -100,6 +100,9 @@ class _Forwarder(threading.Thread):
 
     def _relay(self, client):
         upstream = self._reach_session()
+        for sock in (client, upstream):
+            if sock is not None:
+                _keepalive(sock)
         if upstream is None:
             # Nothing is running yet. Closing is right: the far side retries,
             # and it must not be handed a socket that goes nowhere.
@@ -207,6 +210,7 @@ class Supervisor:
             "run.start",
             "run.status",
             "run.stop",
+            "run.log",
             "info",
         ):
             link.handle(name, getattr(self, "_" + name.replace(".", "_")))
@@ -379,6 +383,24 @@ class Supervisor:
             "running": self._running(),
             "exit_code": self.last_exit,
             "pid": self.child.pid if self.child else None,
+        }
+
+    def _run_log(self, payload=None):
+        """The tail of the last session's output, whether or not it is running.
+
+        The buffer was always kept for exactly this -- "the only record of why
+        a session died if the launcher was not attached when it did" -- but
+        nothing could ask for it, so the record was unreachable. A session that
+        dies while the launcher is disconnected left the reason sitting in this
+        process with no way out of it.
+        """
+        lines = int((payload or {}).get("lines") or 200)
+        text = "".join(self.child_output)
+        tail = text.splitlines()[-lines:]
+        return {
+            "text": "\n".join(tail),
+            "running": self._running(),
+            "exit_code": self.last_exit,
         }
 
     def _run_stop(self, _payload=None):

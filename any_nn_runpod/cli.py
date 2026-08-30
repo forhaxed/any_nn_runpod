@@ -437,6 +437,41 @@ def command_gpus(project, args) -> int:
     return 0
 
 
+def command_logs(project, args) -> int:
+    """What the session last said, read off the pod after the fact.
+
+    The supervisor keeps the tail whether or not anyone is attached. Until now
+    nothing could ask for it, so a session that died while the launcher was
+    disconnected took the reason with it -- which is the one moment you most
+    want to read it.
+    """
+    from any_nn_runpod.cloud import driver, lifecycle
+
+    client = _client(project)
+    ours, _others = lifecycle.managed_pods(client)
+    pods = [pod for pod in ours if pod.get("name") == project.pod_name]
+    if not pods:
+        _say(f"No pod named {project.pod_name!r} to read logs from.")
+        return 1
+
+    control = driver.connect_supervisor(
+        pods[0], project.ports[0], token=os.environ.get("ANR_TOKEN"), say=_say
+    )
+    try:
+        answer = control.call("run.log", {"lines": args.lines}, timeout=60) or {}
+    finally:
+        control.close("logs read")
+
+    state = (
+        "running"
+        if answer.get("running")
+        else f"exited with code {answer.get('exit_code')}"
+    )
+    _heading(f"Session on {pods[0]['id']} -- {state}")
+    _say(answer.get("text") or "  (nothing recorded)")
+    return 0
+
+
 def command_ps(project, args) -> int:
     """List the pods this tool created.  Other pods are counted, never listed."""
     from any_nn_runpod.cloud import driver, lifecycle
@@ -877,6 +912,12 @@ def build_parser():
         "--yes", action="store_true", help="do not ask about the pod on interrupt"
     )
     start.set_defaults(handler=command_start)
+
+    logs = subparsers.add_parser(
+        "logs", help="what the session on this project's pod last said"
+    )
+    logs.add_argument("--lines", type=int, default=200)
+    logs.set_defaults(handler=command_logs)
 
     ps = subparsers.add_parser("ps", help="list the pods any_nn_runpod created")
     ps.set_defaults(handler=command_ps)
