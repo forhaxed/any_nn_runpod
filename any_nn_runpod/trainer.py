@@ -131,7 +131,13 @@ class RunpodTrainer:
                 "__len__, or wrap it: DatasetWrapper takes its length from the "
                 "machine that owns the data, which usually does know."
             ) from exc
-        return max(1, (batches // self.gradient_accumulation_steps) * self.repeats)
+        # Multiply before dividing. The loop yields every batch ``repeats``
+        # times, so the micro-batches in an epoch are batches * repeats and the
+        # optimizer steps are that, floored by the accumulation. Flooring first
+        # and multiplying after loses up to repeats-1 steps an epoch -- and on
+        # a dataset smaller than one accumulation group it reports zero steps
+        # for a pass that does real work.
+        return max(1, (batches * self.repeats) // self.gradient_accumulation_steps)
 
     @property
     def total_steps(self) -> int:

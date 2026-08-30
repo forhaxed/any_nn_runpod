@@ -383,3 +383,27 @@ def test_lock_files_work_when_there_is_no_link(tmp_path):
     (tmp_path / "do_eval.lock").write_text("")
     assert sorted(logger.take_control()) == ["eval", "resume"]
     assert not (tmp_path / "do_eval.lock").exists()  # one shot
+
+
+def test_steps_per_epoch_multiplies_before_it_floors():
+    """``repeats`` yields each batch again, so it belongs inside the division.
+
+    Flooring first and multiplying after loses up to repeats-1 optimizer steps
+    every epoch, and the number it produces is what sizes the LR schedule --
+    so the error lands on the learning rate, not just on a progress bar.
+    """
+    from any_nn_runpod.trainer import RunpodTrainer
+
+    def steps(batches, accum, repeats):
+        trainer = RunpodTrainer()
+        trainer.train_dataloader = [None] * batches
+        trainer.gradient_accumulation_steps = accum
+        trainer.repeats = repeats
+        return trainer.steps_per_epoch
+
+    # 100 batches seen 5 times is 500 micro-batches: 31 groups of 16, not 30.
+    assert steps(100, 16, 5) == 31
+    # A pass shorter than one group still does work, and still counts as a step.
+    assert steps(15, 16, 2) == 1
+    # The ordinary case is unchanged.
+    assert steps(2659, 16, 1) == 166
