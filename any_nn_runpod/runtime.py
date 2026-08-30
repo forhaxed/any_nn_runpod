@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import os
 import runpy
+import time
 import sys
 import traceback
 
@@ -89,6 +90,49 @@ session = Session()
 # ======================================================================
 #  Process entry
 # ======================================================================
+def _await_local(listener, wait: float):
+    """Wait for a local side, surviving connections that turn out not to be one.
+
+    The session used to accept exactly one connection and die if its greeting
+    failed.  On a port reachable from the internet that is not a rare event:
+    RunPod's edge probes it, the supervisor's forwarder opens it to see whether
+    the session is up yet, a launcher that gave up leaves one behind.  Any of
+    those killed the run before it had trained a step -- with a BrokenPipeError
+    from the middle of the handshake, which reads like a protocol bug rather
+    than a stray visitor.
+
+    Returns a live Link, or None if the wait ran out.
+    """
+    deadline = time.monotonic() + wait
+    ignored = 0
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None
+        channel = listener.accept(timeout=remaining)
+        if channel is None:
+            return None
+        try:
+            # Bounded: a connection that never greets must not hold the session
+            # before it has run a single step.
+            return Link(channel, role="remote").start(
+                initiate=False, handshake_timeout=60.0
+            )
+        except Exception as exc:  # noqa: BLE001 -- the next caller may be real
+            ignored += 1
+            print(
+                f"Ignoring a connection that did not complete a greeting "
+                f"({type(exc).__name__}: {exc}); still waiting for the local "
+                f"side [{ignored} so far]",
+                file=sys.stderr,
+                flush=True,
+            )
+            try:
+                channel.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+
 def serve(entry: str, host: str, port: int, output_dir: str, wait: float | None):
     """Accept one local connection (or don't), then run ``entry``."""
     global session
@@ -102,20 +146,13 @@ def serve(entry: str, host: str, port: int, output_dir: str, wait: float | None)
             file=sys.stderr,
             flush=True,
         )
-        channel = listener.accept(timeout=wait)
-        if channel is None:
+        link = _await_local(listener, wait) or NullLink()
+        if not link.connected:
             print(
                 f"No local side connected within {wait:.0f}s -- running "
                 "standalone.",
                 file=sys.stderr,
                 flush=True,
-            )
-        else:
-            # Bounded for the same reason as the supervisor's: a connection
-            # that never greets must not hold the session before it has run a
-            # single step.
-            link = Link(channel, role="remote").start(
-                initiate=False, handshake_timeout=60.0
             )
 
     workdir = os.path.dirname(os.path.abspath(entry))

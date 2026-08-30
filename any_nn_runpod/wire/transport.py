@@ -107,6 +107,7 @@ class TcpTransport(Transport):
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, _BUFFER)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, _BUFFER)
+        _keepalive(sock)
         self.bytes_sent = 0
         self.bytes_received = 0
         self._send_closed = False
@@ -116,6 +117,13 @@ class TcpTransport(Transport):
         sock = socket.create_connection((host, port), timeout=timeout)
         sock.settimeout(None)  # blocking for the life of the session
         return cls(sock)
+
+    # -- keepalive ----------------------------------------------------
+    #: Probe an idle connection after this long, then every ``KEEPALIVE_INTERVAL``
+    #: until ``KEEPALIVE_COUNT`` go unanswered.  Dead in roughly 90 seconds.
+    KEEPALIVE_IDLE = 60
+    KEEPALIVE_INTERVAL = 10
+    KEEPALIVE_COUNT = 3
 
     def send_frame(self, ftype: int, payload) -> None:
         view = payload if isinstance(payload, memoryview) else memoryview(payload)
@@ -205,5 +213,35 @@ class TcpListener:
         self.closed = True
         try:
             self.socket.close()
+        except OSError:
+            pass
+
+
+def _keepalive(sock: socket.socket):
+    """Make the kernel notice a peer that vanished without saying goodbye.
+
+    Without this a half-open connection is invisible: the socket stays
+    readable-forever from the application's point of view, and whoever is
+    blocked on it waits for the rest of the pod's life.  On a supervisor that
+    means a launcher whose machine died leaves the pod accepting TCP
+    connections it will never answer -- alive, billing, and deaf.
+
+    Default idle time on Linux is two hours, which is not a timeout so much as
+    a rumour, so the intervals are set explicitly where the platform allows it.
+    """
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+    except OSError:
+        return
+    for option, value in (
+        ("TCP_KEEPIDLE", TcpTransport.KEEPALIVE_IDLE),
+        ("TCP_KEEPINTVL", TcpTransport.KEEPALIVE_INTERVAL),
+        ("TCP_KEEPCNT", TcpTransport.KEEPALIVE_COUNT),
+    ):
+        number = getattr(socket, option, None)
+        if number is None:
+            continue  # Windows has no per-socket knobs; SO_KEEPALIVE it is
+        try:
+            sock.setsockopt(socket.IPPROTO_TCP, number, value)
         except OSError:
             pass
