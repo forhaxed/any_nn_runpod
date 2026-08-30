@@ -62,6 +62,31 @@ def build_manifest(root: str) -> dict:
     return manifest
 
 
+def measure(root: str) -> tuple:
+    """``(files, bytes)`` for what would be uploaded, without hashing any of it.
+
+    ``build_manifest`` reads every byte to fingerprint it, which is the right
+    thing before a sync and the wrong thing before a pod exists -- this answers
+    "will it fit" in milliseconds.
+    """
+    files = total = 0
+    for directory, subdirectories, names in os.walk(root):
+        subdirectories[:] = [
+            name
+            for name in subdirectories
+            if name not in IGNORE_DIRS and not name.startswith(".")
+        ]
+        for name in names:
+            if name.endswith(IGNORE_SUFFIXES):
+                continue
+            try:
+                total += os.path.getsize(os.path.join(directory, name))
+                files += 1
+            except OSError:
+                continue
+    return files, total
+
+
 def _digest(path: str) -> str:
     digest = hashlib.sha256()
     with open(path, "rb") as handle:

@@ -792,24 +792,20 @@ def test_a_very_long_gpu_name_does_not_shove_the_columns_out_of_line():
 # ======================================================================
 #  Which disk things land on
 # ======================================================================
-def test_remote_goes_on_the_container_disk_and_output_on_the_volume():
-    """The two disks behave differently, and each thing wants a different one.
-
-    /workspace is a volume whose size RunPod defaults to 20 GB whether or not
-    anyone asked -- so a workspace under it ignores container_disk_gb and dies
-    partway through a large upload. Output has the opposite requirement: the
-    container disk is wiped on stop, and stopping is what the launcher does to
-    a pod whose output exists nowhere else.
+def test_everything_lands_on_the_disk_that_survives_a_restart():
+    """RunPod's container disk is "lost on stop/restart" -- not just on a stop
+    you asked for, but on any restart of the container. A base model that has
+    to be re-uploaded because a container bounced is the cost this library
+    exists to avoid, so remote/, the venv and the output all go on the volume.
     """
     from any_nn_runpod.manifest import Recipe
 
-    workspace, output = lifecycle.disks(Recipe(container_disk_gb=100))
-    assert not workspace.startswith("/workspace"), "remote/ is on the volume again"
-    assert output.startswith("/workspace"), "output would not survive a stop"
-
-    # A network volume is attached precisely so things live on it.
-    workspace, output = lifecycle.disks(Recipe(network_volume_id="nv-1"))
-    assert workspace.startswith("/workspace") and output.startswith("/workspace")
+    workspace, output, env_cache = lifecycle.disks(Recipe(container_disk_gb=100))
+    for path in (workspace, output, env_cache):
+        assert path.startswith("/workspace"), f"{path} would not survive a restart"
+    # And output still is not inside the workspace, or the next sync would
+    # delete it as stale.
+    assert not output.startswith(workspace.rstrip("/") + "/")
 
 
 def test_the_pod_is_told_where_to_put_things():
@@ -829,9 +825,10 @@ def test_the_pod_is_told_where_to_put_things():
     lifecycle.create(
         Recorder([]), Project(pod_name="anr-test"), recipe, say=lambda _t: None
     )
-    workspace, output = lifecycle.disks(recipe)
+    workspace, output, env_cache = lifecycle.disks(recipe)
     assert captured["env"]["ANR_WORKSPACE"] == workspace
     assert captured["env"]["ANR_OUTPUT_ROOT"] == output
+    assert captured["env"]["ANR_ENV_CACHE"] == env_cache
 
     # And a recipe that overrides them deliberately still wins.
     lifecycle.create(
@@ -841,6 +838,29 @@ def test_the_pod_is_told_where_to_put_things():
         say=lambda _t: None,
     )
     assert captured["env"]["ANR_WORKSPACE"] == "/mine"
+
+
+def test_a_volume_too_small_for_remote_is_refused_before_the_pod_exists(tmp_path):
+    """A volume can only ever be grown, and its size is fixed at creation, so
+    this is the last moment the answer is free."""
+    from any_nn_runpod.manifest import Project, Recipe
+
+    remote = tmp_path / "remote"
+    remote.mkdir()
+    (remote / "model.safetensors").write_bytes(bytes(6 << 20))
+
+    project = Project(root=str(tmp_path))
+    with pytest.raises(RunPodError) as refusal:
+        lifecycle.room_for_remote(project, Recipe(volume_gb=2), say=lambda _t: None)
+    text = str(refusal.value)
+    assert "volume_gb" in text and "remote/" in text
+    assert "Raise it to at least" in text
+
+    # Room enough is silent, and a network volume is sized by someone else.
+    lifecycle.room_for_remote(project, Recipe(volume_gb=40), say=lambda _t: None)
+    lifecycle.room_for_remote(
+        project, Recipe(volume_gb=1, network_volume_id="nv-1"), say=lambda _t: None
+    )
 
 
 def test_the_volume_size_is_stated_rather_than_left_to_runpod():

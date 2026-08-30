@@ -377,28 +377,38 @@ anything written into it would be deleted as stale by the next sync.
 ### The pod's two disks
 
 A pod has a container disk and a volume, and they differ in the one way that
-matters:
+decides everything here:
 
 | | container disk | volume at `/workspace` |
 |---|---|---|
-| sized by | `container_disk_gb` | `volume_gb` (RunPod defaults it to **20 GB**) |
-| survives a stop | no | yes |
+| sized by | `container_disk_gb` | `volume_gb` (RunPod defaults it to 20 GB) |
+| survives a restart or stop | **no** -- "lost on stop/restart" | yes |
 | survives a terminate | no | no (a *network* volume does) |
-| holds | `remote/`, the venv | the output of a `--no-link` run |
+| price | $0.10/GB/month running | $0.10 running, $0.20 stopped |
+| holds | the image, pip's cache | **`remote/`, the venv, the output** |
 
-`remote/` goes on the container disk: it is the big one, it is the one you
-sized, and losing it on a stop costs nothing because the next `run.py start`
-re-syncs from the manifest. Putting it on `/workspace` instead is how a 15 GB
-upload dies against a 20 GB limit nobody chose -- which is what this library
-used to do.
+Everything of yours goes on the volume. Not because a stop is likely, but
+because the container disk is lost on *any* restart of the container -- and
+re-uploading a 15 GB base model because a container bounced is the cost this
+library exists to avoid. The two cost the same while a pod runs, so there is
+nothing to buy by preferring the disk that forgets.
 
-Output goes on the volume, because output is what has to survive: a run with
-no local side keeps its only copy there, and stopping such a pod is exactly
-what the launcher does when it ends.
+So `volume_gb` has to fit `remote/`. `run.py start` checks before creating the
+pod and refuses with both numbers if it does not -- a volume's size is fixed at
+creation and can only ever be grown, so that is the last moment the answer is
+free.
 
-Disk sizes are fixed when a pod is created. Changing either means a new pod.
-A sync bigger than the free space is refused before a byte moves, with both
-numbers in the message.
+What the volume does *not* survive is a terminate, which is the default
+`on_finish`. If you want the upload to happen once ever rather than once per
+pod, that is a **network volume**: $0.07/GB/month, kept independently of any
+pod, mounted at `/workspace` in its place. Put its id in `[pod]
+network_volume_id`. It has to be attached when the pod is created, cannot be
+detached, and lives in one data centre -- which costs you the multi-region
+fallback that keeps `up` from failing on "no instances available".
+
+One more thing worth knowing before leaning on stop-and-resume: stopping
+releases the GPU, and RunPod does not promise it back. "You may be allocated
+zero GPUs if capacity has changed."
 
 ## Pods and money
 

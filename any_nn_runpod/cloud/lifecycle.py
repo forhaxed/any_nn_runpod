@@ -24,10 +24,15 @@ from __future__ import annotations
 
 import time
 
+from any_nn_runpod.cloud import sync
 from any_nn_runpod.cloud.api import RunPod, RunPodError, endpoint
 
 #: Set on every pod this tool creates, and the only thing that makes a pod ours.
 MARKER = "ANR_MANAGED"
+
+#: Slack to leave on the volume beyond remote/ itself: the venv, and a
+#: checkpoint being written by a run with no local side.
+VOLUME_HEADROOM_GB = 8.0
 
 
 def is_managed(pod: dict) -> bool:
@@ -78,33 +83,51 @@ def start_command(library_source: str, ports: tuple, token: str | None) -> list:
 
 
 def disks(recipe) -> tuple:
-    """Which disk holds the uploaded code, and which holds the output.
+    """Where the uploaded code, the venv and the output live on a pod.
 
-    A RunPod pod has two, and they behave differently in the one way that
-    matters here:
+    All three on the volume at ``/workspace``, and for one reason: it is the
+    only thing on a pod that survives a restart.  RunPod is explicit that the
+    container disk is "lost on stop/restart" -- not merely on a stop you asked
+    for, but on any restart of the container -- and re-uploading a base model
+    because a container bounced is exactly the cost this library exists to
+    avoid.
 
-    * the **container disk** is sized by ``container_disk_gb`` and is wiped
-      when the pod stops;
-    * the **volume** at ``/workspace`` is sized by ``volume_gb`` -- which
-      RunPod defaults to 20 GB whether or not you asked for one -- and
-      survives a stop.
+    The two cost about the same while a pod runs ($0.10/GB/month each), so
+    there is nothing to buy by preferring the disk that forgets.
 
-    So ``remote/`` goes on the container disk.  It is the big one, it is the
-    one you actually paid to size, and losing it on a stop costs nothing: the
-    next ``run.py start`` re-syncs from the manifest.  Putting it on
-    ``/workspace`` instead is how a 15 GB upload dies at 20 GB against a
-    limit nobody chose.
+    What the volume does *not* survive is a terminate. If you want the upload
+    to happen once ever rather than once per pod, that is a network volume
+    ($0.07/GB/month, kept independently of any pod) -- put its id in
+    ``[pod] network_volume_id`` and it mounts here instead.
 
-    Output goes on the volume, because output is the thing that must survive:
-    a run with no local side keeps its only copy there, and stopping such a
-    pod is exactly what the launcher does when the run ends.
+    The container disk still holds the image and pip's cache, so
+    ``container_disk_gb`` still matters; it just no longer decides whether an
+    upload fits.
+    """
+    return "/workspace/remote", "/workspace", "/workspace/.anr/envs"
 
-    A recipe pointing at a network volume gets both on it -- that is what
-    someone attaches a network volume for.
+
+def room_for_remote(project, recipe, say=print):
+    """Refuse a pod whose volume is too small for remote/ before creating it.
+
+    Disk sizes are fixed when a pod is created and a volume can only ever be
+    grown, so this is the last moment the answer is free.  The alternative is
+    finding out 40 minutes into an upload.
     """
     if recipe.network_volume_id:
-        return "/workspace/remote", "/workspace"
-    return "/root/anr/remote", "/workspace"
+        return  # sized elsewhere, and not by us
+    files, wanted = sync.measure(project.remote_path)
+    gigabytes = wanted / (1 << 30)
+    if gigabytes + VOLUME_HEADROOM_GB <= recipe.volume_gb:
+        return
+    raise RunPodError(
+        f"remote/ is {gigabytes:.1f} GB ({files} files) and [pod] volume_gb is "
+        f"{recipe.volume_gb}.\n"
+        f"Raise it to at least {int(gigabytes + VOLUME_HEADROOM_GB) + 1} in "
+        f"remote/anr.toml. The volume is where remote/ lives, because it is "
+        f"the only disk on a pod that survives a restart -- and its size is "
+        f"fixed when the pod is created."
+    )
 
 
 def create(
@@ -124,7 +147,8 @@ def create(
         )
 
     ports = tuple(project.ports)
-    workspace, output_root = disks(recipe)
+    room_for_remote(project, recipe, say)
+    workspace, output_root, env_cache = disks(recipe)
     say(
         f"Creating pod {project.pod_name!r} ({recipe.image}) on "
         + (gpus[0] if len(gpus) == 1 else f"{len(gpus)} candidate GPUs: {gpus[0]}, ...")
@@ -148,6 +172,7 @@ def create(
             "ANR_PROJECT": project.pod_name,
             "ANR_WORKSPACE": workspace,
             "ANR_OUTPUT_ROOT": output_root,
+            "ANR_ENV_CACHE": env_cache,
             **recipe.env,
         },
         container_disk_gb=recipe.container_disk_gb,

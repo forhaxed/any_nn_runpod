@@ -41,22 +41,20 @@ import traceback
 from any_nn_runpod.link import Link
 from any_nn_runpod.wire.transport import TcpListener
 
-#: Where the uploaded ``remote/`` lands.  On the **container disk**, not on
-#: ``/workspace``.
-#:
-#: ``/workspace`` is a RunPod volume, and ``volumeInGb`` defaults to 20 whether
-#: or not anyone asked for one -- so a workspace under it silently ignores the
-#: ``container_disk_gb`` you paid for and dies partway through a large upload.
-#: The container disk is wiped when a pod stops, which is fine for this: the
-#: next ``run.py start`` re-syncs, because the manifest is the source of truth.
-#: Output is the thing that must survive a stop, and it goes to ANR_OUTPUT_ROOT.
-WORKSPACE = os.environ.get("ANR_WORKSPACE", "/root/anr/remote")
+#: Where the uploaded ``remote/`` lands: the volume, because it is the only
+#: disk on a pod that survives a restart.  RunPod's container disk is "lost on
+#: stop/restart", and a base model that has to be re-uploaded because a
+#: container bounced is the cost this library exists to avoid.  ``volumeInGb``
+#: has to be big enough for it -- the launcher checks before creating the pod.
+WORKSPACE = os.environ.get("ANR_WORKSPACE", "/workspace/remote")
 
-#: Where a run writes when there is no local side to write to.  Set by the
-#: launcher to the volume, so ``run.py start`` can stop a pod without throwing
-#: away the only copy of its output.  Unset means "beside the workspace", which
-#: is what a supervisor running outside a pod should do.
+#: Where a run writes when there is no local side to write to.  Unset means
+#: "beside the workspace", which is what a supervisor outside a pod should do.
 OUTPUT_ROOT = os.environ.get("ANR_OUTPUT_ROOT") or None
+
+#: Where built venvs are cached.  On the volume too, so a restart costs a
+#: re-sync of nothing and a rebuild of nothing.
+ENV_CACHE = os.environ.get("ANR_ENV_CACHE") or None
 SESSION_PORT = int(os.environ.get("ANR_SESSION_PORT", 7778))
 
 #: The session listens here, on loopback, and the supervisor forwards the
@@ -300,7 +298,7 @@ class Supervisor:
         say = lambda text: self._tell(text + "\n")  # noqa: E731
         python = envs.resolve(
             recipe,
-            cache_root=payload.get("cache_root") or envs.DEFAULT_CACHE,
+            cache_root=payload.get("cache_root") or ENV_CACHE or envs.DEFAULT_CACHE,
             install=payload.get("install"),
             say=say,
             force=bool(payload.get("force")),
