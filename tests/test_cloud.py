@@ -915,3 +915,59 @@ def test_room_enough_says_nothing_and_an_old_supervisor_is_not_refused():
     driver._check_room(Roomy({"disk_free_gb": 90.0}), 15 * (1 << 30), say=lambda _t: None)
     # A supervisor that does not report free space is not grounds to refuse.
     driver._check_room(Roomy({}), 15 * (1 << 30), say=lambda _t: None)
+
+
+def test_the_forwarder_does_not_hang_up_on_a_quiet_link():
+    """A session link went through the forwarder and died after five seconds.
+
+    ``socket.create_connection(..., timeout=5)`` bounds the connect, but the
+    timeout stays on the returned socket and bounds every later recv too. The
+    relay treats a timeout like any other OSError, tears itself down and closes
+    both ends -- so any link through the forwarder lasted five seconds of quiet.
+
+    Five seconds is nothing. A training script is silent for minutes while it
+    loads its model, and every pod run died there: the launcher saw "connection
+    closed mid-frame", and the session found its link gone the moment it first
+    tried to use it.
+    """
+    import threading
+
+    from any_nn_runpod.agent import _Forwarder
+    from any_nn_runpod.wire.transport import TcpListener, TcpTransport
+
+    quiet = 7.0  # longer than the five seconds that used to be fatal
+
+    internal = TcpListener("127.0.0.1", 0)
+    forwarder = _Forwarder(0, internal.port)
+    public = TcpListener("127.0.0.1", 0)
+    forwarder.public_port = public.port
+    public.socket.close()
+    forwarder.start()
+    time.sleep(0.5)
+
+    held = {}
+
+    def session():
+        channel = internal.accept(timeout=20)
+        held["link"] = Link(channel, role="remote").start(
+            initiate=False, handshake_timeout=20.0
+        )
+
+    threading.Thread(target=session, daemon=True).start()
+    time.sleep(0.3)
+
+    channel = Channel(TcpTransport.connect("127.0.0.1", forwarder.public_port, timeout=10))
+    launcher = Link(channel, role="local").start(initiate=True, handshake_timeout=20.0)
+    launcher.handle("echo", lambda payload: {"n": payload["n"] + 1})
+
+    time.sleep(quiet)
+
+    assert held["link"].connected, (
+        f"the link through the forwarder died during {quiet:.0f}s of silence: "
+        f"{held['link'].close_reason}"
+    )
+    # And it is not merely "connected" -- it still carries traffic.
+    assert held["link"].call("echo", {"n": 41}, timeout=15) == {"n": 42}
+
+    launcher.close("done")
+    internal.close()

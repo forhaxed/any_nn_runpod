@@ -118,11 +118,20 @@ class _Forwarder(threading.Thread):
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             try:
-                return socket.create_connection(
+                upstream = socket.create_connection(
                     ("127.0.0.1", self.internal_port), timeout=5
                 )
             except OSError:
                 time.sleep(0.5)
+                continue
+            # The timeout bounded the *connect*. Left on the socket it also
+            # bounds every later recv, and _pump treats a timeout like any
+            # other OSError -- it tears the relay down and closes both ends.
+            # So the whole session link died after five seconds of quiet, which
+            # is nothing: a training script is silent for far longer than that
+            # while it loads its model. Blocking from here on.
+            upstream.settimeout(None)
+            return upstream
         return None
 
 
