@@ -82,6 +82,10 @@ class DatasetWrapper:
         self._fallback_factory = fallback
         self._unpack = unpack
         self._link = None
+        #: Whether a live link was ever handed to this wrapper.  The difference
+        #: between "there is no local side" and "there was one and it went
+        #: away" is the difference between two completely unrelated fixes.
+        self._had_link = False
         self._fallback = None
         self._length = None
         self._batch_size = None
@@ -97,6 +101,7 @@ class DatasetWrapper:
     def bind(self, link):
         """Called by the session once the link (or NullLink) exists."""
         self._link = link
+        self._had_link = self._had_link or bool(link is not None and link.connected)
         return self
 
     @property
@@ -134,6 +139,17 @@ class DatasetWrapper:
         if self._fallback is None and self._fallback_factory is not None:
             self._fallback = self._fallback_factory()
         if self._fallback is None and not self.optional:
+            if self._had_link:
+                # Telling someone to add a fallback here would send them off to
+                # fix the wrong thing entirely: they had a local side, and it
+                # was serving this dataset until the connection died.
+                reason = getattr(self._link, "close_reason", None) or "no reason given"
+                raise NotConnected(
+                    f"the link to the local side dropped before {self.name!r} "
+                    f"could be read ({reason}).\n"
+                    "This is not a missing fallback -- the local side was there. "
+                    "Look at what happened to the connection."
+                )
             raise NotConnected(
                 f"dataset {self.name!r} has no link and no fallback. Either run "
                 f"with a local/ script that registers {self.name!r}, or give the "
