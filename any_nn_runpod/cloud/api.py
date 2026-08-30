@@ -72,7 +72,7 @@ class RunPod:
         env: dict | None = None,
         gpu_count: int = 1,
         container_disk_gb: int = 40,
-        volume_gb: int = 0,
+        volume_gb: int = 20,
         volume_mount_path: str = "/workspace",
         network_volume_id: str | None = None,
         cloud_type: str = "SECURE",
@@ -105,7 +105,10 @@ class RunPod:
             body["dockerStartCmd"] = list(start_command)
         if network_volume_id:
             body["networkVolumeId"] = network_volume_id
-        elif volume_gb:
+        else:
+            # Always sent, even at 0. RunPod's own default for this field is
+            # 20 GB, so leaving it out does not mean "no volume" -- it means a
+            # 20 GB one appears at /workspace and nobody said so.
             body["volumeInGb"] = volume_gb
             body["volumeMountPath"] = volume_mount_path
         if data_centers:

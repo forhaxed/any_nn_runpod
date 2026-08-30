@@ -787,3 +787,111 @@ def test_a_very_long_gpu_name_does_not_shove_the_columns_out_of_line():
     # allowed to differ.
     assert long_line.index("EU-CZ-1") == short_line.index("EU-SE-1")
     assert cli._offer_header().index("region") == long_line.index("EU-CZ-1")
+
+
+# ======================================================================
+#  Which disk things land on
+# ======================================================================
+def test_remote_goes_on_the_container_disk_and_output_on_the_volume():
+    """The two disks behave differently, and each thing wants a different one.
+
+    /workspace is a volume whose size RunPod defaults to 20 GB whether or not
+    anyone asked -- so a workspace under it ignores container_disk_gb and dies
+    partway through a large upload. Output has the opposite requirement: the
+    container disk is wiped on stop, and stopping is what the launcher does to
+    a pod whose output exists nowhere else.
+    """
+    from any_nn_runpod.manifest import Recipe
+
+    workspace, output = lifecycle.disks(Recipe(container_disk_gb=100))
+    assert not workspace.startswith("/workspace"), "remote/ is on the volume again"
+    assert output.startswith("/workspace"), "output would not survive a stop"
+
+    # A network volume is attached precisely so things live on it.
+    workspace, output = lifecycle.disks(Recipe(network_volume_id="nv-1"))
+    assert workspace.startswith("/workspace") and output.startswith("/workspace")
+
+
+def test_the_pod_is_told_where_to_put_things():
+    from any_nn_runpod.manifest import Project, Recipe
+
+    captured = {}
+
+    class Recorder(FakeClient):
+        def create_pod(self, **kwargs):
+            captured.update(kwargs)
+            return {"id": "new", "env": kwargs["env"]}
+
+        def wait_until_ready(self, pod_id, ports, **kwargs):
+            return {"id": pod_id, "publicIp": "1.2.3.4", "portMappings": {"7777": 1}}
+
+    recipe = Recipe(gpu=["NVIDIA GeForce RTX 4090"], container_disk_gb=100)
+    lifecycle.create(
+        Recorder([]), Project(pod_name="anr-test"), recipe, say=lambda _t: None
+    )
+    workspace, output = lifecycle.disks(recipe)
+    assert captured["env"]["ANR_WORKSPACE"] == workspace
+    assert captured["env"]["ANR_OUTPUT_ROOT"] == output
+
+    # And a recipe that overrides them deliberately still wins.
+    lifecycle.create(
+        Recorder([]),
+        Project(pod_name="anr-test"),
+        Recipe(gpu=["NVIDIA GeForce RTX 4090"], env={"ANR_WORKSPACE": "/mine"}),
+        say=lambda _t: None,
+    )
+    assert captured["env"]["ANR_WORKSPACE"] == "/mine"
+
+
+def test_the_volume_size_is_stated_rather_than_left_to_runpod():
+    """volumeInGb defaults to 20 at RunPod's end. Not sending it does not mean
+    "no volume" -- it means one appears and nobody wrote it down."""
+    from any_nn_runpod.manifest import Project, Recipe
+
+    captured = {}
+
+    class Recorder(FakeClient):
+        def create_pod(self, **kwargs):
+            captured.update(kwargs)
+            return {"id": "new", "env": kwargs["env"]}
+
+        def wait_until_ready(self, pod_id, ports, **kwargs):
+            return {"id": pod_id, "publicIp": "1.2.3.4", "portMappings": {"7777": 1}}
+
+    lifecycle.create(
+        Recorder([]),
+        Project(pod_name="anr-test"),
+        Recipe(gpu=["NVIDIA GeForce RTX 4090"]),
+        say=lambda _t: None,
+    )
+    assert captured["volume_gb"] == 20
+
+
+def test_a_sync_too_big_for_the_pod_is_refused_with_the_numbers():
+    """And refused before a byte moves, not three quarters of the way in."""
+
+    class Cramped:
+        def call(self, name, payload=None, timeout=None):
+            assert name == "info"
+            return {"disk_free_gb": 19.4, "workspace": "/workspace/remote"}
+
+    with pytest.raises(RunPodError) as refusal:
+        driver._check_room(Cramped(), 15 * (1 << 30), say=lambda _t: None)
+
+    text = str(refusal.value)
+    assert "19.4" in text and "15.0" in text
+    assert "container_disk_gb" in text
+    assert "/workspace" in text, "the message should say which disk it means"
+
+
+def test_room_enough_says_nothing_and_an_old_supervisor_is_not_refused():
+    class Roomy:
+        def __init__(self, answer):
+            self.answer = answer
+
+        def call(self, name, payload=None, timeout=None):
+            return self.answer
+
+    driver._check_room(Roomy({"disk_free_gb": 90.0}), 15 * (1 << 30), say=lambda _t: None)
+    # A supervisor that does not report free space is not grounds to refuse.
+    driver._check_room(Roomy({}), 15 * (1 << 30), say=lambda _t: None)

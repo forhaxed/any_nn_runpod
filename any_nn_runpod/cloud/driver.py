@@ -14,7 +14,7 @@ import time
 from tqdm.auto import tqdm
 
 from any_nn_runpod.cloud import sync
-from any_nn_runpod.cloud.api import endpoint
+from any_nn_runpod.cloud.api import RunPodError, endpoint
 from any_nn_runpod.link import Link, LinkError
 from any_nn_runpod.wire.protocol import Channel
 from any_nn_runpod.wire.transport import TcpTransport
@@ -80,6 +80,38 @@ def connect_supervisor(pod: dict, port: int, token=None, timeout=420.0, say=prin
     )
 
 
+#: Room to leave beyond the upload itself -- pip's cache, a checkpoint being
+#: written, the odd log.  A sync that fills the disk to the last byte is a pod
+#: that fails at the next thing it tries instead of at the sync.
+HEADROOM_GB = 5.0
+
+
+def _check_room(link, wanted_bytes: int, say=print):
+    """Refuse an upload the pod has nowhere to put, and say so in numbers.
+
+    Without this the failure is an OSError from a half-written ``.part`` file
+    somewhere inside a progress bar, which tells you nothing about which disk
+    ran out or how much it had.
+    """
+    info = link.call("info", timeout=60) or {}
+    free = info.get("disk_free_gb")
+    if free is None:
+        return  # an older supervisor; not a reason to refuse
+
+    wanted = wanted_bytes / (1 << 30)
+    if wanted + HEADROOM_GB <= free:
+        return
+    raise RunPodError(
+        f"the pod has {free:.1f} GB free where remote/ goes "
+        f"({info.get('workspace', '?')}), and this sync needs "
+        f"{wanted:.1f} GB.\n"
+        "Raise [pod] container_disk_gb in remote/anr.toml and make a new pod "
+        "-- disk size is fixed when a pod is created.\n"
+        "If that path is under /workspace it is a volume, sized by "
+        "[pod] volume_gb (RunPod's default is 20 GB), not by container_disk_gb."
+    )
+
+
 def push_remote(link, remote_dir: str, say=print) -> dict:
     """Send only what differs.  Returns what moved."""
     say("Syncing remote/ ...")
@@ -94,6 +126,7 @@ def push_remote(link, remote_dir: str, say=print) -> dict:
     moved = 0
     if send:
         total = sync.total_bytes(remote_dir, send)
+        _check_room(link, total, say)
         say(f"  {len(send)} file(s) to send, {total / (1 << 20):.1f} MiB")
         bar = tqdm(total=total, unit="B", unit_scale=True, desc="  uploading", leave=False)
         stream = link.open_stream("sync", depth=8)

@@ -51,7 +51,10 @@ class Recipe:
     gpu_priority: str = "availability"
     gpu_count: int = 1
     container_disk_gb: int = 60
-    volume_gb: int = 0
+    #: The volume at /workspace, which survives a pod being stopped. Holds the
+    #: output of a run with no local side; `remote/` goes on the container disk.
+    #: RunPod's own default is 20 whether or not you ask, so this names it.
+    volume_gb: int = 20
     network_volume_id: str | None = None
     cloud_type: str = "SECURE"
     data_centers: list = field(default_factory=list)
@@ -98,7 +101,7 @@ class Recipe:
             gpu_priority=pod.get("gpu_priority", cls.gpu_priority),
             gpu_count=int(pod.get("gpu_count", 1)),
             container_disk_gb=int(pod.get("container_disk_gb", 60)),
-            volume_gb=int(pod.get("volume_gb", 0)),
+            volume_gb=int(pod.get("volume_gb", cls.volume_gb)),
             network_volume_id=pod.get("network_volume_id"),
             cloud_type=pod.get("cloud_type", cls.cloud_type),
             data_centers=list(pod.get("data_centers", [])),

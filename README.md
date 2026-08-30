@@ -369,10 +369,36 @@ library_source = "git+https://github.com/YOU/any_nn_runpod.git"
 | `run.py local` | `local/out/` (`[paths] output`) |
 | `run.py local --no-link` | `out/`, beside `remote/` |
 | `run.py start` | `local/out/` on **your** machine |
-| `run.py start --no-link` | `/workspace/out` on the pod, beside `remote/` |
+| `run.py start --no-link` | `/workspace/out` on the pod -- the volume, so a stop keeps it |
 
 Never inside `remote/`: that directory is kept in step with your copy, so
 anything written into it would be deleted as stale by the next sync.
+
+### The pod's two disks
+
+A pod has a container disk and a volume, and they differ in the one way that
+matters:
+
+| | container disk | volume at `/workspace` |
+|---|---|---|
+| sized by | `container_disk_gb` | `volume_gb` (RunPod defaults it to **20 GB**) |
+| survives a stop | no | yes |
+| survives a terminate | no | no (a *network* volume does) |
+| holds | `remote/`, the venv | the output of a `--no-link` run |
+
+`remote/` goes on the container disk: it is the big one, it is the one you
+sized, and losing it on a stop costs nothing because the next `run.py start`
+re-syncs from the manifest. Putting it on `/workspace` instead is how a 15 GB
+upload dies against a 20 GB limit nobody chose -- which is what this library
+used to do.
+
+Output goes on the volume, because output is what has to survive: a run with
+no local side keeps its only copy there, and stopping such a pod is exactly
+what the launcher does when it ends.
+
+Disk sizes are fixed when a pod is created. Changing either means a new pod.
+A sync bigger than the free space is refused before a byte moves, with both
+numbers in the message.
 
 ## Pods and money
 

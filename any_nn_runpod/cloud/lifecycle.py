@@ -77,6 +77,36 @@ def start_command(library_source: str, ports: tuple, token: str | None) -> list:
     ]
 
 
+def disks(recipe) -> tuple:
+    """Which disk holds the uploaded code, and which holds the output.
+
+    A RunPod pod has two, and they behave differently in the one way that
+    matters here:
+
+    * the **container disk** is sized by ``container_disk_gb`` and is wiped
+      when the pod stops;
+    * the **volume** at ``/workspace`` is sized by ``volume_gb`` -- which
+      RunPod defaults to 20 GB whether or not you asked for one -- and
+      survives a stop.
+
+    So ``remote/`` goes on the container disk.  It is the big one, it is the
+    one you actually paid to size, and losing it on a stop costs nothing: the
+    next ``run.py start`` re-syncs from the manifest.  Putting it on
+    ``/workspace`` instead is how a 15 GB upload dies at 20 GB against a
+    limit nobody chose.
+
+    Output goes on the volume, because output is the thing that must survive:
+    a run with no local side keeps its only copy there, and stopping such a
+    pod is exactly what the launcher does when the run ends.
+
+    A recipe pointing at a network volume gets both on it -- that is what
+    someone attaches a network volume for.
+    """
+    if recipe.network_volume_id:
+        return "/workspace/remote", "/workspace"
+    return "/root/anr/remote", "/workspace"
+
+
 def create(
     client: RunPod,
     project,
@@ -94,6 +124,7 @@ def create(
         )
 
     ports = tuple(project.ports)
+    workspace, output_root = disks(recipe)
     say(
         f"Creating pod {project.pod_name!r} ({recipe.image}) on "
         + (gpus[0] if len(gpus) == 1 else f"{len(gpus)} candidate GPUs: {gpus[0]}, ...")
@@ -110,7 +141,15 @@ def create(
         start_command=start_command(project.library_source, ports, token),
         # The marker is what makes this pod ours, and nothing else here will
         # act on a pod without it. No API key: see the module docstring.
-        env={MARKER: "1", "ANR_PROJECT": project.pod_name, **recipe.env},
+        # ANR_WORKSPACE and ANR_OUTPUT_ROOT before recipe.env, so a recipe
+        # that sets them deliberately still wins.
+        env={
+            MARKER: "1",
+            "ANR_PROJECT": project.pod_name,
+            "ANR_WORKSPACE": workspace,
+            "ANR_OUTPUT_ROOT": output_root,
+            **recipe.env,
+        },
         container_disk_gb=recipe.container_disk_gb,
         volume_gb=recipe.volume_gb,
         network_volume_id=recipe.network_volume_id,

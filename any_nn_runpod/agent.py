@@ -41,7 +41,22 @@ import traceback
 from any_nn_runpod.link import Link
 from any_nn_runpod.wire.transport import TcpListener
 
-WORKSPACE = os.environ.get("ANR_WORKSPACE", "/workspace/remote")
+#: Where the uploaded ``remote/`` lands.  On the **container disk**, not on
+#: ``/workspace``.
+#:
+#: ``/workspace`` is a RunPod volume, and ``volumeInGb`` defaults to 20 whether
+#: or not anyone asked for one -- so a workspace under it silently ignores the
+#: ``container_disk_gb`` you paid for and dies partway through a large upload.
+#: The container disk is wiped when a pod stops, which is fine for this: the
+#: next ``run.py start`` re-syncs, because the manifest is the source of truth.
+#: Output is the thing that must survive a stop, and it goes to ANR_OUTPUT_ROOT.
+WORKSPACE = os.environ.get("ANR_WORKSPACE", "/root/anr/remote")
+
+#: Where a run writes when there is no local side to write to.  Set by the
+#: launcher to the volume, so ``run.py start`` can stop a pod without throwing
+#: away the only copy of its output.  Unset means "beside the workspace", which
+#: is what a supervisor running outside a pod should do.
+OUTPUT_ROOT = os.environ.get("ANR_OUTPUT_ROOT") or None
 SESSION_PORT = int(os.environ.get("ANR_SESSION_PORT", 7778))
 
 #: The session listens here, on loopback, and the supervisor forwards the
@@ -347,14 +362,19 @@ class Supervisor:
     def _output_dir(self, requested) -> str:
         """Where a run writes when there is no local side to write to.
 
-        Beside the workspace, never inside it. ``remote/`` is uploaded whole
-        and its far side is kept in step with yours -- a run writing into it
-        would put checkpoints in line to be deleted as stale on the next sync,
-        and would force the upload to carve out an exception for a directory
-        name you might well be using for something else.
+        Never inside the workspace. ``remote/`` is uploaded whole and its far
+        side is kept in step with yours -- a run writing into it would put
+        checkpoints in line to be deleted as stale on the next sync, and would
+        force the upload to carve out an exception for a directory name you
+        might well be using for something else.
+
+        On a pod this is the volume rather than merely the next directory up,
+        because the container disk does not survive a stop and stopping is
+        precisely what ``run.py start`` does to a pod whose output exists
+        nowhere else.
         """
-        beside = os.path.dirname(self.workspace.rstrip("/\\")) or "/"
-        return os.path.join(beside, requested or "out")
+        root = OUTPUT_ROOT or os.path.dirname(self.workspace.rstrip("/\\")) or "/"
+        return os.path.join(root, requested or "out")
 
     def _run_status(self, _payload=None):
         return {
