@@ -63,17 +63,40 @@ def satisfied_by_current(recipe: dict) -> bool:
 
 
 def _importable(requirement: str) -> bool:
-    """Is this requirement already satisfiable here?  Name only, not version.
+    """Is this requirement already satisfied here -- version included?
 
-    A version-pinned requirement is never assumed satisfied: pins exist because
-    the exact version matters, and guessing wrong is worse than a rebuild.
+    A pin is not a reason to give up: ``importlib.metadata`` knows the exact
+    version installed, so ``diffusers==0.37.1`` can be checked rather than
+    guessed.  This used to return False for anything pinned, which meant a
+    recipe listing five exact versions -- all of them already installed --
+    still built a venv, and that venv came back with a CPU-only torch on top
+    of a perfectly good CUDA one.
+
+    Ranges and git/path requirements stay unsatisfiable: resolving those
+    properly is a package manager's job, and a rebuild is cheaper than being
+    wrong about it.
     """
+    import importlib.metadata
     import importlib.util
     import re
 
-    if re.search(r"[<>=!~@]", requirement) or requirement.startswith(("git+", ".", "/")):
+    requirement = requirement.strip()
+    if requirement.startswith(("git+", ".", "/")):
         return False
-    name = re.split(r"[\[;\s]", requirement.strip())[0].replace("-", "_")
+
+    pinned = re.match(r"^([A-Za-z0-9][A-Za-z0-9._-]*)(?:\[[^\]]*\])?==([^\s;]+)$", requirement)
+    if pinned:
+        name, wanted = pinned.group(1), pinned.group(2)
+        try:
+            return importlib.metadata.version(name) == wanted
+        except importlib.metadata.PackageNotFoundError:
+            return False
+        except Exception:  # noqa: BLE001 -- a broken dist-info is not a match
+            return False
+
+    if re.search(r"[<>=!~@]", requirement):
+        return False
+    name = re.split(r"[\[;\s]", requirement)[0].replace("-", "_")
     try:
         return importlib.util.find_spec(name) is not None
     except (ImportError, ValueError):
@@ -108,7 +131,9 @@ def resolve(
 
     if not force and os.path.exists(marker) and os.path.exists(python):
         say(f"Environment: reusing {directory}")
-        _install_extras(python, install, say, quiet=True)
+        _install_extras(
+            python, install, say, quiet=True, inherits=_inherits_base(recipe)
+        )
         return python
 
     say(f"Environment: building for {_describe(recipe)} -- this happens once.")
@@ -128,7 +153,8 @@ def resolve(
     # happened to depend on -- while the perfectly good CUDA build in the pod's
     # image sits one directory away, ignored. So the base environment stays
     # visible unless the recipe is specifically replacing torch.
-    if _inherits_base(recipe):
+    inherits = _inherits_base(recipe)
+    if inherits:
         create += ["--system-site-packages"]
         say("  (inheriting the base environment: the recipe pins no torch)")
     _run(create, say, "creating the venv")
@@ -148,21 +174,36 @@ def resolve(
             command += ["--index-url", str(recipe["torch_index"])]
         _run(command, say, "installing torch")
 
+    installer = _installer(python, inherits)
     requirements = list(recipe.get("requirements") or [])
     if requirements:
-        _run(
-            uv + ["pip", "install", "--python", python, *requirements],
-            say,
-            "installing the run's packages",
-        )
+        _run(installer + requirements, say, "installing the run's packages")
 
-    _install_extras(python, install, say)
+    _install_extras(python, install, say, inherits=inherits)
 
     os.makedirs(directory, exist_ok=True)
     with open(marker, "w") as handle:
         json.dump(recipe, handle, indent=2, default=str)
     say(f"Environment ready in {time.perf_counter() - started:.0f}s: {directory}")
     return python
+
+
+def _installer(python: str, inherits_base: bool) -> list:
+    """The command that puts packages into the venv.
+
+    uv is faster, and it is what an isolated venv gets.  But uv resolves as
+    though the venv were empty: with --system-site-packages the interpreter can
+    already see torch, and uv fetches its own anyway -- the plain PyPI wheel,
+    which is CPU-only.  That lands on top of the image's CUDA build and the
+    rented GPU goes unused.
+
+    pip does look at what the venv inherits, and reports nothing to do when the
+    packages are already there.  So whenever the recipe is deliberately
+    building on the base environment, pip is the one that gets used.
+    """
+    if inherits_base:
+        return [python, "-m", "pip", "install", "--disable-pip-version-check"]
+    return [sys.executable, "-m", "uv", "pip", "install", "--python", python]
 
 
 def _inherits_base(recipe: dict) -> bool:
@@ -192,7 +233,7 @@ def _describe(recipe: dict) -> str:
     return ", ".join(bits)
 
 
-def _install_extras(python, install, say, quiet=False):
+def _install_extras(python, install, say, quiet=False, inherits=False):
     """Put any_nn_runpod (and friends) in, always fresh.
 
     Outside the recipe hash on purpose: the venv should follow whatever is
@@ -202,8 +243,10 @@ def _install_extras(python, install, say, quiet=False):
         return
     if python == sys.executable:
         return  # already running out of it
+    # any_nn_runpod depends on torch, so this install is the other way a CPU
+    # wheel gets in even when the recipe's own packages are handled correctly.
     _run(
-        [sys.executable, "-m", "uv", "pip", "install", "--python", python, *install],
+        _installer(python, inherits) + list(install),
         say,
         "installing any_nn_runpod",
         quiet=quiet,
